@@ -1,0 +1,7 @@
+# Optional ML lane (pyproject [project.optional-dependencies.ml])
+numpy>=1.26
+pandas>=2.2
+scikit-learn>=1.4
+lightgbm>=4.5.0
+joblib>=1.4.0
+schedule>=1.2.0

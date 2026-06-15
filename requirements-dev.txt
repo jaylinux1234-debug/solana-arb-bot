@@ -1,0 +1,5 @@
+# Dev + ML compile input — lock with: npm run deps:lock:dev
+#   uv pip compile requirements-dev.txt -o requirements-dev.lock
+-r requirements/base.txt
+-r requirements/ml.txt
+-r requirements/dev.txt

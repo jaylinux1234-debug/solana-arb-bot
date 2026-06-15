@@ -1,0 +1,4 @@
+# Optional prod overlay — stack is consolidated in root docker-compose.yml.
+# Kept for `npm run compose:prod:*` file merge compatibility (no service overrides).
+
+services: {}

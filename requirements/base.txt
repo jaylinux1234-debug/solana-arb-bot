@@ -1,0 +1,28 @@
+# Core bot + monitor runtime (pinned via requirements.lock)
+aiohttp>=3.10.0
+python-dotenv>=1.0.0
+# Latest PyPI ccxt is 4.5.x (4.5.90+ not published yet); floor tracks Backpack fixes
+ccxt>=4.5.56
+solders>=0.27.0
+# solana-py (RPC/WS); keep with solders — not solders-only (wide AsyncClient usage)
+solana>=0.36.0
+base58>=2.1.1
+openai>=2.0.0
+httpx>=0.27.0
+fastapi>=0.136.0
+uvicorn>=0.48.0; sys_platform == "win32"
+uvicorn[standard]>=0.48.0; sys_platform != "win32"
+redis>=5.0.0
+psutil>=5.9.0
+requests>=2.31.0
+prometheus-client>=0.20.0
+pybreaker>=1.2.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+protobuf>=4.25.0
+# Latest PyPI web3 is 7.16.x (7.20+ not published yet)
+web3>=7.16.0
+tenacity>=8.2.0
+structlog>=24.0.0

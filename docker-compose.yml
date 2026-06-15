@@ -1,0 +1,245 @@
+# Solana arb bot — hardened production stack (monitor + Redis) — LEDGER REMOVED
+# Config: .env + compose.env (`npm run sync:compose-env`)
+# Monitoring overlay: infra/compose/docker-compose.monitoring.yml (Prometheus/Grafana/Loki)
+
+services:
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: solana-arb-monitor
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=256m,noexec
+    env_file:
+      - .env
+      - compose.env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: redis://redis:6379/0
+      APP_ENV: ${APP_ENV:-development}
+      SIGNER_TYPE: "hot"
+      ENABLE_LEDGER_BRIDGE: "false"
+      LEDGER_SIGN_URL: ""
+      HELIUS_API_KEY: ${HELIUS_API_KEY}
+      CEX_DEX_MIN_GROSS_SPREAD_BPS: ${CEX_DEX_MIN_GROSS_SPREAD_BPS:-6}
+      CEX_DEX_MIN_NET_SPREAD_BPS: ${CEX_DEX_MIN_NET_SPREAD_BPS:-1.5}
+      CEX_DEX_STRATEGY_BASE_COST_BPS: ${CEX_DEX_STRATEGY_BASE_COST_BPS:-9.0}
+      CEX_DEX_USE_COMPONENT_COST_MODEL: ${CEX_DEX_USE_COMPONENT_COST_MODEL:-true}
+      CEX_DEX_MAX_TRADE_USDC_MICRO: ${CEX_DEX_MAX_TRADE_USDC_MICRO:-35000000}
+      CEX_DEX_ROUNDTRIP_SIM_MIN_NET_BPS: ${CEX_DEX_ROUNDTRIP_SIM_MIN_NET_BPS:-0.25}
+      CEX_DEX_ROUNDTRIP_SIM_MIN_NET_BPS_GO_LIVE: ${CEX_DEX_ROUNDTRIP_SIM_MIN_NET_BPS_GO_LIVE:-0.20}
+      CEX_DEX_AGGRESSIVE_OPPORTUNITY_FILTER: "false"
+      ENABLE_ONCHAIN_PROFIT_ASSERT: "true"
+      ONCHAIN_PROFIT_ASSERT_BPS: ${ONCHAIN_PROFIT_ASSERT_BPS:-12}
+      ONCHAIN_PROFIT_ASSERT_STRICT: ${ONCHAIN_PROFIT_ASSERT_STRICT:-true}
+      AI_APPROVE_MIN_CONFIDENCE: ${AI_APPROVE_MIN_CONFIDENCE:-52}
+      MAX_FLASH_USDC: ${MAX_FLASH_USDC:-25}
+      MAX_DRAWDOWN_PCT: ${MAX_DRAWDOWN_PCT:-5.5}
+      MIN_PROFIT_USDC: ${MIN_PROFIT_USDC:-2.0}
+      MAX_DAILY_LOSS_USDC: ${MAX_DAILY_LOSS_USDC:-20}
+      LIVE_TRADE_COOLDOWN_SECONDS: ${LIVE_TRADE_COOLDOWN_SECONDS:-35}
+      MAX_LIVE_TRADES_PER_HOUR: ${MAX_LIVE_TRADES_PER_HOUR:-12}
+      JUPITER_API_KEY: ${JUPITER_API_KEY:-}
+      JUPITER_QUOTE_URL: ${JUPITER_QUOTE_URL:-https://api.jup.ag/swap/v1/quote}
+      JUPITER_SWAP_URL: ${JUPITER_SWAP_URL:-https://api.jup.ag/swap/v1/swap}
+      JUPITER_QUOTE_MIN_INTERVAL_SEC: ${JUPITER_QUOTE_MIN_INTERVAL_SEC:-0.8}
+      JUPITER_QUOTE_MAX_CONCURRENT: ${JUPITER_QUOTE_MAX_CONCURRENT:-2}
+      CEX_DEX_ORACLE_POLL_MIN_SEC: ${CEX_DEX_ORACLE_POLL_MIN_SEC:-1.5}
+      CEX_DEX_ORACLE_POLL_MAX_SEC: ${CEX_DEX_ORACLE_POLL_MAX_SEC:-4}
+      HELIUS_BACKRUN_MIN_AMOUNT_MICRO: ${HELIUS_BACKRUN_MIN_AMOUNT_MICRO:-35000000}
+      METRICS_PROMETHEUS_PORT: ${METRICS_PROMETHEUS_PORT:-9091}
+      V2_PNL_LOG: ${V2_PNL_LOG:-/app/pnl_data/v2_pnl.jsonl}
+      SECRETS_ENCRYPTION: sops
+      SOPS_AGE_KEY_FILE: /run/secrets/sops_age_key
+      BACKPACK_API_KEY_FILE: /run/secrets/backpack_api_key
+      BACKPACK_SECRET_FILE: /run/secrets/backpack_secret
+      HELIUS_API_KEY_FILE: /run/secrets/helius_api_key
+      JUPITER_API_KEY_FILE: /run/secrets/jupiter_api_key
+      OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
+      PRIVATE_KEY_FILE: /run/secrets/private_key
+      PRIVATE_KEY_CEX_DEX_FILE: /run/secrets/private_key_cex_dex
+      V2_ROUTER_MEV_ONLY: ${V2_ROUTER_MEV_ONLY:-false}
+      ENABLE_HELIUS_WEBHOOK: ${ENABLE_HELIUS_WEBHOOK:-true}
+      ENABLE_HELIUS_WEBHOOK_BACKRUN: ${ENABLE_HELIUS_WEBHOOK_BACKRUN:-true}
+      ENABLE_COLLATERAL_RATE_ARB: ${ENABLE_COLLATERAL_RATE_ARB:-true}
+      ENABLE_LIQUIDATION_MONITORING: ${ENABLE_LIQUIDATION_MONITORING:-true}
+      ENABLE_MEV_LOGGING: ${ENABLE_MEV_LOGGING:-true}
+      BOT_HEALTH_PORT: "8000"
+    secrets:
+      - sops_age_key
+      - private_key
+      - private_key_cex_dex
+      - helius_api_key
+      - backpack_api_key
+      - backpack_secret
+      - jupiter_api_key
+      - openai_api_key
+    volumes:
+      - ./logs:/app/logs:rw
+      - ./backtest_results:/app/backtest_results:rw
+      - ./pnl_data:/app/pnl_data:rw
+    ports:
+      - "8000:8000"
+      - "8799:8799"
+      - "9091:9091"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - botnet
+    command: ["python", "-m", "src.v2.main"]
+    healthcheck:
+      test: ["CMD", "python", "scripts/docker_healthcheck.py"]
+      interval: 20s
+      timeout: 8s
+      retries: 5
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          cpus: "6.0"
+          memory: 6G
+
+  monitor-blue:
+    extends:
+      service: monitor
+    container_name: solana-arb-monitor-blue
+    profiles: ["blue"]
+    environment:
+      APP_ENV: production
+      TEST_MODE: "false"
+      V2_ROUTER_MEV_ONLY: "false"
+      ENABLE_HELIUS_WEBHOOK: "true"
+      ENABLE_HELIUS_WEBHOOK_BACKRUN: "true"
+      HELIUS_WEBHOOK_AUTO_CREATE: "false"
+      ENABLE_COLLATERAL_RATE_ARB: "true"
+      ENABLE_LIQUIDATION_MONITORING: "true"
+      ENABLE_MEV_LOGGING: "true"
+      COLLATERAL_MIN_NET_BPS: ${COLLATERAL_MIN_NET_BPS:-25}
+      LIQUIDATION_MIN_PROFIT_USDC: ${LIQUIDATION_MIN_PROFIT_USDC:-2.5}
+      COLLATERAL_FLASH_AMOUNT_USDC_MICRO: ${COLLATERAL_FLASH_AMOUNT_USDC_MICRO:-20000000}
+      KAMINO_ALERT_MIN_UTIL: ${KAMINO_ALERT_MIN_UTIL:-0.88}
+      KAMINO_ALERT_MIN_LTV_RATIO: ${KAMINO_ALERT_MIN_LTV_RATIO:-0.88}
+      V2_HEALTH_PORT: "8000"
+      BOT_HEALTH_PORT: "8000"
+      COLLATERAL_HEURISTIC_AUTO_APPROVE_NET_BPS: ${COLLATERAL_HEURISTIC_AUTO_APPROVE_NET_BPS:-300}
+      COLLATERAL_AI_MIN_CONFIDENCE: ${COLLATERAL_AI_MIN_CONFIDENCE:-52}
+    ports:
+      - "${MONITOR_BLUE_PORT:-8001}:8000"
+      - "8798:8799"
+      - "9092:9091"
+    command: ["python", "-m", "src.v2.main"]
+
+  monitor-green:
+    extends:
+      service: monitor
+    container_name: solana-arb-monitor-green
+    profiles: ["green"]
+    environment:
+      APP_ENV: production
+      TEST_MODE: "false"
+      V2_ROUTER_MEV_ONLY: "false"
+      ENABLE_HELIUS_WEBHOOK: "true"
+      ENABLE_HELIUS_WEBHOOK_BACKRUN: "true"
+      HELIUS_WEBHOOK_AUTO_CREATE: "false"
+      ENABLE_COLLATERAL_RATE_ARB: "true"
+      ENABLE_LIQUIDATION_MONITORING: "true"
+      ENABLE_MEV_LOGGING: "true"
+      COLLATERAL_MIN_NET_BPS: ${COLLATERAL_MIN_NET_BPS:-25}
+      LIQUIDATION_MIN_PROFIT_USDC: ${LIQUIDATION_MIN_PROFIT_USDC:-2.5}
+      COLLATERAL_FLASH_AMOUNT_USDC_MICRO: ${COLLATERAL_FLASH_AMOUNT_USDC_MICRO:-20000000}
+      KAMINO_ALERT_MIN_UTIL: ${KAMINO_ALERT_MIN_UTIL:-0.88}
+      KAMINO_ALERT_MIN_LTV_RATIO: ${KAMINO_ALERT_MIN_LTV_RATIO:-0.88}
+      V2_HEALTH_PORT: "8000"
+      BOT_HEALTH_PORT: "8000"
+      COLLATERAL_HEURISTIC_AUTO_APPROVE_NET_BPS: ${COLLATERAL_HEURISTIC_AUTO_APPROVE_NET_BPS:-300}
+      COLLATERAL_AI_MIN_CONFIDENCE: ${COLLATERAL_AI_MIN_CONFIDENCE:-52}
+    ports:
+      - "${MONITOR_GREEN_PORT:-8002}:8000"
+      - "8797:8799"
+      - "9093:9091"
+    command: ["python", "-m", "src.v2.main"]
+
+  redis:
+    image: redis:7-alpine
+    container_name: bot-redis
+    restart: unless-stopped
+    command: redis-server --save 30 1 --maxmemory 1gb --maxmemory-policy allkeys-lru --timeout 60
+    volumes:
+      - redis_data:/data
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      monitor:
+        condition: service_healthy
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme}
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    networks:
+      - botnet
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+
+secrets:
+  sops_age_key:
+    file: ./secrets/.local/sops_age_key
+  private_key:
+    file: ./secrets/encrypted/private_key.enc.yaml
+  private_key_cex_dex:
+    file: ./secrets/.local/private_key_cex_dex
+  helius_api_key:
+    file: ./secrets/encrypted/helius_api_key.enc.yaml
+  backpack_api_key:
+    file: ./secrets/encrypted/backpack_api_key.enc.yaml
+  backpack_secret:
+    file: ./secrets/encrypted/backpack_secret.enc.yaml
+  openai_api_key:
+    file: ./secrets/encrypted/openai_api_key.enc.yaml
+  jupiter_api_key:
+    file: ./secrets/encrypted/jupiter_api_key.enc.yaml
+
+volumes:
+  redis_data:
+
+networks:
+  botnet:
+    driver: bridge

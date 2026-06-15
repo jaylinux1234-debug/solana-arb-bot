@@ -1,0 +1,80 @@
+{
+  "uid": "solana-arb-bot",
+  "title": "Solana Arb Bot — Production",
+  "tags": ["solana", "arb", "monitor"],
+  "timezone": "browser",
+  "refresh": "15s",
+  "panels": [
+    {
+      "title": "Bot Up",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "targets": [{ "expr": "solana_bot_up", "legendFormat": "up" }],
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 }
+    },
+    {
+      "title": "On-chain USDC balance",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "targets": [{ "expr": "onchain_usdc_balance", "legendFormat": "USDC" }],
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 }
+    },
+    {
+      "title": "V2 fill rate",
+      "type": "gauge",
+      "datasource": "Prometheus",
+      "targets": [{ "expr": "v2_fill_rate", "legendFormat": "fill rate" }],
+      "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit" } },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 }
+    },
+    {
+      "title": "RPC connection (by provider)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rpc_connection_status",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 }
+    },
+    {
+      "title": "Trade executions (rate by strategy)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum by (strategy, success) (rate(trade_executions_total[5m]))",
+          "legendFormat": "{{strategy}} success={{success}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 }
+    },
+    {
+      "title": "RPC failures total (by provider)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(rpc_failures_total[5m])",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 }
+    },
+    {
+      "title": "RPC provider failures (legacy rate)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(rpc_provider_failures_total[5m])",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 }
+    }
+  ],
+  "time": { "from": "now-6h", "to": "now" }
+}

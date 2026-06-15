@@ -1,0 +1,4 @@
+# Optional override slot (WS/RPC now in root docker-compose.yml).
+# Kept for compose file list compatibility.
+
+services: {}

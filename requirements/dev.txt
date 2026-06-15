@@ -1,0 +1,7 @@
+# Dev / CI (pyproject [project.optional-dependencies.dev])
+pytest>=8.0
+ruff>=0.4
+mypy>=1.8
+black>=24.0
+# KLend IDL Program loader (also installed in Dockerfile for production MEV)
+anchorpy>=0.20.0,<0.22.0

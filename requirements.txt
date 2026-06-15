@@ -1,0 +1,9 @@
+# Production compile input — lock with: npm run deps:lock
+#   uv pip compile requirements.txt -o requirements.lock
+-r requirements/base.txt
+jito-py-rpc>=0.1.0
+lightgbm>=4.5.0
+schedule>=1.2.0
+phoenix-trade @ git+https://github.com/Ellipsis-Labs/phoenixpy.git@8f148701da06ed908c12bb9014c1aac8a1715c1e
+# phoenix-trade declares no deps on PyPI — Dockerfile installs borsh-construct, anchorpy (spl via solana-py)
+joblib>=1.4.0

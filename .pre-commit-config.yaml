@@ -1,0 +1,17 @@
+# Install: pip install pre-commit && pre-commit install
+# Encrypts secrets/.local → secrets/encrypted/*.enc.yaml on commit when .local files change.
+repos:
+  - repo: local
+    hooks:
+      - id: sops-encrypt-local
+        name: SOPS encrypt secrets/.local
+        entry: node scripts/sops-encrypt-local.mjs
+        language: system
+        pass_filenames: false
+        files: ^secrets/\.local/
+      - id: block-env-txt
+        name: Block legacy .env.txt
+        entry: node scripts/check-no-env-txt.mjs
+        language: system
+        pass_filenames: false
+        always_run: true

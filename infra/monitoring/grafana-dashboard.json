@@ -1,0 +1,161 @@
+{
+  "dashboard": {
+    "uid": "solana-cex-dex-bot",
+    "title": "Solana CEX-DEX Bot — Risk & Execution",
+    "tags": ["solana", "cex-dex", "arb"],
+    "timezone": "browser",
+    "refresh": "15s",
+    "time": { "from": "now-6h", "to": "now" },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Win rate % (CEX-DEX)",
+        "type": "gauge",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "targets": [{ "expr": "strategy_win_rate{strategy=\"cex_dex\"}", "legendFormat": "win %" }],
+        "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+        "fieldConfig": {
+          "defaults": {
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "red", "value": null },
+                { "color": "yellow", "value": 55 },
+                { "color": "green", "value": 65 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Drawdown %",
+        "type": "gauge",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "targets": [{ "expr": "drawdown_pct", "legendFormat": "DD" }],
+        "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+        "fieldConfig": {
+          "defaults": {
+            "max": 10,
+            "thresholds": {
+              "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 2 },
+                { "color": "red", "value": 3 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Circuit breaker",
+        "type": "stat",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "targets": [{ "expr": "circuit_breaker_tripped", "legendFormat": "tripped" }],
+        "gridPos": { "h": 6, "w": 4, "x": 12, "y": 0 }
+      },
+      {
+        "id": 4,
+        "title": "Inventory reconcile OK",
+        "type": "stat",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "targets": [{ "expr": "inventory_reconcile_ok", "legendFormat": "ok" }],
+        "gridPos": { "h": 6, "w": 4, "x": 16, "y": 0 }
+      },
+      {
+        "id": 5,
+        "title": "Daily PnL (USD)",
+        "type": "stat",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "targets": [{ "expr": "daily_pnl_usd", "legendFormat": "PnL" }],
+        "gridPos": { "h": 6, "w": 4, "x": 20, "y": 0 }
+      },
+      {
+        "id": 6,
+        "title": "Execution slippage (bps)",
+        "type": "heatmap",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "targets": [
+          {
+            "expr": "sum(rate(execution_slippage_bps_bucket[5m])) by (le)",
+            "legendFormat": "{{le}}",
+            "format": "heatmap"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 }
+      },
+      {
+        "id": 7,
+        "title": "RPC latency (p95)",
+        "type": "timeseries",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(rpc_request_latency_seconds_bucket[5m])) by (le, provider))",
+            "legendFormat": "{{provider}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 }
+      },
+      {
+        "id": 8,
+        "title": "Trade executions",
+        "type": "timeseries",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "targets": [
+          {
+            "expr": "sum(rate(trade_executions_total[5m])) by (strategy, success)",
+            "legendFormat": "{{strategy}} success={{success}}"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 }
+      },
+      {
+        "id": 9,
+        "title": "Opportunity net spread (bps)",
+        "type": "timeseries",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.5, sum(rate(opportunity_net_bps_bucket[5m])) by (le))",
+            "legendFormat": "p50 net bps"
+          }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 }
+      },
+      {
+        "id": 10,
+        "title": "Memory (RSS bytes)",
+        "type": "timeseries",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "targets": [{ "expr": "memory_usage_bytes", "legendFormat": "RSS" }],
+        "gridPos": { "h": 6, "w": 8, "x": 0, "y": 22 }
+      },
+      {
+        "id": 11,
+        "title": "Bot uptime",
+        "type": "stat",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "targets": [{ "expr": "bot_uptime_seconds", "legendFormat": "uptime" }],
+        "gridPos": { "h": 6, "w": 8, "x": 8, "y": 22 }
+      },
+      {
+        "id": 12,
+        "title": "Near misses / hour",
+        "type": "timeseries",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "targets": [
+          {
+            "expr": "rate(cex_dex_near_misses_total[1h]) * 3600",
+            "legendFormat": "near_miss/h"
+          }
+        ],
+        "gridPos": { "h": 6, "w": 8, "x": 16, "y": 22 }
+      }
+    ]
+  },
+  "overwrite": true
+}

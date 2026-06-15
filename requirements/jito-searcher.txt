@@ -1,0 +1,4 @@
+# Optional: gRPC Jito SearcherClient (jito_executor / flash bot).
+# Pins solana==0.34.0 — do NOT merge into prod lock if you need solana>=0.36.
+# Install manually: uv pip install -r requirements/jito-searcher.txt
+jito-searcher-client>=0.1.6

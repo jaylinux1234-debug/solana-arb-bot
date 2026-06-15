@@ -1,0 +1,24 @@
+# Alias / legacy name (same as solana-arb-monitor.service)
+# Install: sudo bash scripts/install-systemd-monitor.sh --name flash-monitor
+
+[Unit]
+Description=Solana Arb Bot — monitor stack (Docker Compose)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=docker
+WorkingDirectory=/path/to/solana-arb-bot
+ExecStartPre=/usr/bin/npm run sync:compose-env
+ExecStart=/path/to/solana-arb-bot/restart-monitor.sh
+Restart=always
+RestartSec=10
+TimeoutStartSec=0
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

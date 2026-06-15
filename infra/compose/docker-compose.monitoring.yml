@@ -1,0 +1,36 @@
+# Monitoring overlay: Grafana + Loki + Promtail (JSON logs from ./logs).
+# Used with: npm run compose:up:monitoring (stacks infra/compose/*.yml + root docker-compose.yml)
+
+services:
+  loki:
+    image: grafana/loki:2.9.4
+    container_name: loki-prod
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    networks:
+      - botnet
+
+  promtail:
+    image: grafana/promtail:2.9.4
+    container_name: promtail-prod
+    restart: unless-stopped
+    volumes:
+      - ./infra/monitoring/promtail.yml:/etc/promtail/config.yml:ro
+      - ./logs:/var/log/bot:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - botnet
+
+  grafana:
+    volumes:
+      - ./infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: ""
+    depends_on:
+      - loki

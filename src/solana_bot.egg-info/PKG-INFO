@@ -1,0 +1,111 @@
+Metadata-Version: 2.4
+Name: solana-bot
+Version: 0.2.0
+Summary: Solana CEX-DEX arbitrage bot
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: aiohttp>=3.10.0
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: ccxt>=4.4.0
+Requires-Dist: solders>=0.21.0
+Requires-Dist: solana>=0.34.0
+Requires-Dist: base58>=2.1.1
+Requires-Dist: openai>=2.0.0
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: fastapi>=0.109.0
+Requires-Dist: uvicorn[standard]>=0.27.0
+Requires-Dist: redis>=5.0.0
+Requires-Dist: requests>=2.31.0
+Requires-Dist: prometheus-client>=0.20.0
+Requires-Dist: pybreaker>=1.2.0
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: pydantic-settings>=2.0.0
+Requires-Dist: grpcio>=1.60.0
+Requires-Dist: grpcio-tools>=1.60.0
+Requires-Dist: protobuf>=4.25.0
+Requires-Dist: web3>=6.0.0
+Requires-Dist: tenacity>=8.2.0
+Provides-Extra: ml
+Requires-Dist: numpy>=1.26; extra == "ml"
+Requires-Dist: pandas>=2.2; extra == "ml"
+Requires-Dist: scikit-learn>=1.4; extra == "ml"
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+Requires-Dist: mypy; extra == "dev"
+Requires-Dist: black; extra == "dev"
+
+# solana-bot
+
+Solana CEX-DEX arbitrage bot with collateral swap, liquidation monitoring, and production Docker stack.
+
+## Layout
+
+See **[STRUCTURE.md](STRUCTURE.md)** for the canonical tree. Summary:
+
+```
+src/           # application code (config, core, cex, dex, strategies, …)
+infra/         # docker/, compose/, monitoring/
+scripts/       # ops (compose, secrets, go-live)
+secrets/       # encrypted/*.enc.yaml + .local/ (gitignored plaintext)
+tests/
+docker-compose.yml   # base stack; overlays in infra/compose/
+```
+
+## Quick start
+
+Full install + Ledger steps: **[docs/SETUP.md](docs/SETUP.md)**
+
+```bash
+npm run setup:install              # npm install + pip requirements*
+cp .env.example .env             # fill locally; never commit
+npm run go-live:secrets:sh       # secrets/ + .env.txt prod policy
+python -m src.main               # or: npm run compose:prod:up
+```
+
+## Signing (production)
+
+- **`SIGNER_TYPE=ledger` only** in production — no `ALLOW_HOT_KEY_IN_PROD`, no hot `PRIVATE_KEY` in prod env.
+- Prefer an **air-gapped** host for monitor + Ledger; see [docs/SIGNING.md](docs/SIGNING.md).
+
+```bash
+bash scripts/setup-secrets.sh
+```
+
+## Phase 3: Base contract audit & deploy
+
+```bash
+npm install
+export LEDGER_DEPLOYER_ADDRESS=0xYourLedgerEthAddress
+export GNOSIS_SAFE_ADDRESS=0xYourSafe          # contract owner (recommended)
+export BASESCAN_API_KEY=your_basescan_key
+npm run audit:all
+npm run deploy:secure
+```
+
+Details: [docs/PHASE3_DEPLOY.md](docs/PHASE3_DEPLOY.md). Legacy: `bash scripts/deploy-base-ledger.sh`.
+
+## Docker
+
+```bash
+npm run sync:compose-env
+docker compose up -d --build
+npm run compose:prod:up    # sync env + prod stack (Phase 5)
+npm run compose:prod:down
+```
+
+Prometheus: `rpc_connection_status{provider="alchemy"}`, `rpc_provider_failures_total`.
+
+Monitoring & logs: **[docs/MONITORING.md](docs/MONITORING.md)** — `npm run logs:tail`, Grafana :3000, Prometheus :9090.
+RPC CRITICAL alerts: `python.alerts.dispatch_alert` on 429 / WebSocket failures (logged; use Grafana/PagerDuty for paging).
+
+Health API (compose default):
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+## Development
+
+- Prefer imports under `src.*` (e.g. `from src.dex.jupiter import JupiterExecutor`).
+- Root `*.py` shims re-export `src` for legacy scripts; new code should use `src` only.

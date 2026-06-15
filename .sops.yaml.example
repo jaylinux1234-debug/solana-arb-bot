@@ -1,0 +1,12 @@
+# Copy to .sops.yaml and configure recipients (never commit real keys to public repos).
+# https://github.com/getsops/sops
+#
+#   cp .sops.yaml.example .sops.yaml
+#   sops secrets/encrypted/private_key.enc.yaml   # edit in place
+
+creation_rules:
+  - path_regex: secrets/encrypted/.*\.enc\.yaml$
+    age: >-
+      age1example000000000000000000000000000000000000000000000000000000
+    # pgp: FINGERPRINT
+    # kms: arn:aws:kms:...

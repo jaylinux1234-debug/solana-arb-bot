@@ -1,0 +1,35 @@
+name: pytest
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  TEST_MODE: "true"
+  APP_ENV: development
+  SIGNER_TYPE: ledger
+  ALLOW_HOT_KEY_IN_PROD: "0"
+  DENY_DOT_ENV_TXT: "true"
+  DISABLE_BOT_SINGLETON_LOCK: "true"
+  OPENAI_API_KEY: placeholder
+  SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip uv
+          uv pip install --system -r requirements-dev.lock
+          pip install -e .
+
+      - name: Run pytest
+        run: python -m pytest tests/ -q -p no:anchorpy

@@ -1,0 +1,47 @@
+# Docker Swarm overlay: rolling updates for monitor (optional).
+# Deploy: npm run swarm:deploy
+# Update:  npm run swarm:update
+
+version: "3.9"
+
+services:
+  monitor:
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 15s
+        order: start-first
+        failure_action: rollback
+        monitor: 45s
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+        window: 120s
+
+  redis:
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+
+  prometheus:
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  grafana:
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure

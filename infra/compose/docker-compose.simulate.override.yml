@@ -1,0 +1,9 @@
+# 24h+ dry-run: prod stack shape, no live chain sends (TEST_MODE + SIMULATE).
+# Usage: npm run go-live:simulate
+
+services:
+  monitor:
+    environment:
+      SIMULATE: "true"
+      TEST_MODE: "true"
+      LIVE_TRADING_CONFIRM: ""

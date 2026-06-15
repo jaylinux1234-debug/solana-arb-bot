@@ -1,0 +1,79 @@
+# --- Never commit secrets: env files, keys, or credential dumps ---
+
+# Environment (keep .env.example as the only template)
+.env
+.env.*
+!.env.example
+!**/.env.example
+.env.txt
+.env.txt.bak
+compose.env
+
+# Extra — never commit plaintext secret material (encrypted SOPS blobs are OK)
+secrets/**/*.txt
+secrets/.local/
+secrets/private_key*
+secrets/*_api_key*
+secrets/backpack_*
+secrets/helius_*
+secrets/alchemy_*
+secrets/quicknode_*
+secrets/pagerduty_*
+secrets/cow_*
+secrets/oneinch_*
+!secrets/encrypted/*.enc.yaml
+
+# Key / cert material
+*.pem
+*.key
+*.p12
+*.pfx
+id.json
+*-wallet.json
+keypair*.json
+
+# Common credential filenames
+credentials.json
+*-credentials.json
+secrets.json
+.secrets
+*.secret
+application_default_credentials.json
+token.json
+serviceAccount*.json
+
+# Python / tooling
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Hardhat / Node (Ledger deploys)
+node_modules/
+cache/
+artifacts/
+typechain-types/
+coverage/
+coverage.json
+dist/
+hardhat.log
+ignition/deployments/
+
+# Runtime & local data
+logs/*
+!logs/README.md
+backtest_results/*
+!backtest_results/README.md
+pnl_data/*
+!pnl_data/.gitkeep
+keys/*
+!keys/.gitkeep
+secrets/*
+!secrets/README.md
+!secrets/encrypted/
+!secrets/encrypted/README.md
+!secrets/age-recipients.txt.example
+secrets/.local/
+!secrets/README.md
+!secrets/encrypted/.gitkeep
+!secrets/age-recipients.txt.example

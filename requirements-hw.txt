@@ -1,0 +1,2 @@
+# Deprecated — hardware/Ledger uses SIGNER_TYPE=ledger; no extra pip deps.
+# Kept as empty include for older scripts.

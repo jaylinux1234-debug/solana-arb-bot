@@ -1,0 +1,8 @@
+# Deprecated — use requirements/ml.txt (included in requirements-dev.txt).
+-r requirements/ml.txt
+
+# ML dependencies for feature engineering + ensemble models
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+joblib>=1.4.0
