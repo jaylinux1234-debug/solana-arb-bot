@@ -1126,13 +1126,35 @@ class CexDexStrategy:
         record_probe_exec_decay(pair.pair_label, probe_edge_bps, edge_bps)
 
         if not self._is_sane_opportunity(edge_bps, net_bps, size_usdc, pair.symbol):
+            logger.info(
+                "MODEL_NET_SOFT_RESCUE_BYPASS | pair=%s reason=sanity_reject edge=%.1f net=%.1f size_usdc=%.2f",
+                pair.pair_label,
+                edge_bps,
+                net_bps,
+                size_usdc / 1_000_000.0,
+            )
             self.log_near_miss(
                 edge_bps, net_bps, confidence, "sanity_reject", pair=pair.pair_label
             )
             return None
 
+        initially_profitable = self._is_profitable_opportunity(
+            edge_bps,
+            net_bps,
+            confidence,
+            gates=gates,
+        )
+        if initially_profitable:
+            logger.info(
+                "MODEL_NET_SOFT_RESCUE_BYPASS | pair=%s reason=already_profitable edge=%.1f net=%.1f conf=%.1f",
+                pair.pair_label,
+                edge_bps,
+                net_bps,
+                confidence,
+            )
+
         rescued_by_roundtrip = False
-        if not self._is_profitable_opportunity(edge_bps, net_bps, confidence, gates=gates):
+        if not initially_profitable:
             logger.info(
                 "MODEL_NET_SOFT_RESCUE_ELIGIBLE | pair=%s edge=%.1f net=%.1f conf=%.1f test_mode=%s simulate=%s",
                 pair.pair_label,
