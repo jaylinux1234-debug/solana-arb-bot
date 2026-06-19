@@ -31,6 +31,25 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _clamp_vol_pct(vol: float) -> float:
+    """Keep adaptive tiers sane (meme prices in the sample buffer caused absurd values)."""
+    cap = _env_float("CEX_VOL_MAX_PCT", 50.0)
+    return max(0.0, min(cap, float(vol)))
+
+
+def _normalize_vol_symbol(symbol: str | None) -> str:
+    raw = (symbol or "SOL").strip().upper()
+    return raw.replace("/USDC", "").split("_")[0]
+
+
+def _is_sol_vol_price(price: float, symbol: str | None) -> bool:
+    if _normalize_vol_symbol(symbol) != "SOL":
+        return False
+    lo = _env_float("CEX_VOL_SOL_PRICE_MIN", 10.0)
+    hi = _env_float("CEX_VOL_SOL_PRICE_MAX", 500.0)
+    return lo <= float(price) <= hi
+
+
 class VolatilityGate:
     """
     Rolling CEX price volatility → adaptive detection gates.
@@ -69,17 +88,23 @@ class VolatilityGate:
         ):
             return self._cached_vol
 
+        range_vol = get_5m_volatility_pct()
+        if range_vol is not None:
+            vol = _clamp_vol_pct(range_vol)
+            self._cached_vol = vol
+            self.last_vol_check = now
+            return vol
+
         prices = await self.get_price_history("SOL", minutes=5)
         if len(prices) < 3:
-            range_vol = get_5m_volatility_pct()
-            vol = range_vol if range_vol is not None else self._default_low_vol
+            vol = _clamp_vol_pct(self._default_low_vol)
             self._cached_vol = vol
             self.last_vol_check = now
             return vol
 
         self.price_history = [float(p) for p in prices[-20:] if p > 0]
         self.last_vol_check = now
-        self._cached_vol = self._calculate_vol()
+        self._cached_vol = _clamp_vol_pct(self._calculate_vol())
         return self._cached_vol
 
     def _calculate_vol(self) -> float:
@@ -146,9 +171,14 @@ def get_volatility_gate(backpack_client: Any, jupiter_executor: Any | None = Non
     return _default_gate
 
 
-def record_cex_price(price: float, *, ts: float | None = None) -> None:
-    """Append a CEX reference price sample (e.g. best ask for SOL)."""
-    if price <= 0:
+def record_cex_price(
+    price: float,
+    *,
+    ts: float | None = None,
+    symbol: str | None = "SOL",
+) -> None:
+    """Append a SOL CEX reference price sample for the 5m vol window."""
+    if price <= 0 or not _is_sol_vol_price(price, symbol):
         return
     now = ts if ts is not None else time.time()
     _samples.append((now, float(price)))
@@ -189,9 +219,13 @@ def should_skip_low_vol_cycle(
     *,
     vol_threshold_pct: float | None = None,
     min_gross_bps: float | None = None,
+    best_pair: str | None = None,
 ) -> bool:
     """
     Skip scan when 5m vol is low and gross edge is not large enough to justify churn.
+
+    ``current_gross_bps`` should be the **max** gross across pairs when multi-pair
+    scanning is enabled (not SOL-only).
 
     Default: ``vol_5m < 0.8%`` and ``gross < 15`` bps.
     """
@@ -211,12 +245,14 @@ def should_skip_low_vol_cycle(
         else _env_float("CEX_DEX_VOL_SKIP_MAX_GROSS_BPS", 15)
     )
     if vol_5m_pct < vol_thresh and current_gross_bps < gross_thresh:
-        logger.debug(
-            "Vol gate skip | vol_5m=%.3f%% < %.3f%% gross=%.2f < %.2f bps",
+        pair_note = f" best_pair={best_pair}" if best_pair else ""
+        logger.info(
+            "Vol gate skip | vol_5m=%.3f%% < %.3f%% gross_max=%.2f < %.2f bps%s",
             vol_5m_pct,
             vol_thresh,
             current_gross_bps,
             gross_thresh,
+            pair_note,
         )
         return True
     return False

@@ -115,6 +115,17 @@ try:
         ["strategy"],
         buckets=[5, 10, 20, 30, 40, 50, 75, 100, 150, 200],
     )
+    cex_dex_probe_exec_decay_bps = Gauge(
+        "cex_dex_probe_exec_decay_bps",
+        "Probe edge minus selected execution edge (bps)",
+        ["pair"],
+    )
+    cex_dex_probe_exec_decay_hist = Histogram(
+        "cex_dex_probe_exec_decay_hist_bps",
+        "Distribution of probe-to-exec edge decay (bps)",
+        ["pair"],
+        buckets=[0, 1, 2, 3, 5, 8, 12, 20, 30, 50, 80],
+    )
     rpc_request_latency_seconds = Histogram(
         "rpc_request_latency_seconds",
         "RPC HTTP request latency",
@@ -161,6 +172,8 @@ except ImportError:
     PROFIT_TODAY = None  # type: ignore[assignment,misc]
     DRAWDOWN_PCT = None  # type: ignore[assignment,misc]
     execution_slippage_bps = None  # type: ignore[assignment,misc]
+    cex_dex_probe_exec_decay_bps = None  # type: ignore[assignment,misc]
+    cex_dex_probe_exec_decay_hist = None  # type: ignore[assignment,misc]
     rpc_request_latency_seconds = None  # type: ignore[assignment,misc]
     inventory_reconcile_ok = None  # type: ignore[assignment,misc]
     circuit_breaker_tripped = None  # type: ignore[assignment,misc]
@@ -399,6 +412,19 @@ def record_trade_opportunity(strategy: str, gross_bps: int, net_bps: int | None)
         cex_dex_opportunity_gross_bps.labels(strategy=name).set(float(gross_bps))
     if cex_dex_opportunity_net_bps is not None and net_bps is not None:
         cex_dex_opportunity_net_bps.labels(strategy=name).set(float(net_bps))
+
+
+def record_probe_exec_decay(
+    pair: str,
+    probe_edge_bps: float,
+    exec_edge_bps: float,
+) -> None:
+    label = (pair or "unknown").strip().upper() or "UNKNOWN"
+    decay = max(0.0, float(probe_edge_bps) - float(exec_edge_bps))
+    if cex_dex_probe_exec_decay_bps is not None:
+        cex_dex_probe_exec_decay_bps.labels(pair=label).set(decay)
+    if cex_dex_probe_exec_decay_hist is not None:
+        cex_dex_probe_exec_decay_hist.labels(pair=label).observe(decay)
 
 
 def record_attempt(strategy: str) -> None:

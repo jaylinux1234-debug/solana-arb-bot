@@ -28,6 +28,14 @@ COMMON_TOKENS: dict[str, str] = {
     "SAMO": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuGuios",
     "FIDA": "EchesyfXePKdLts4kD8opHjAfhZ4pybYp9C3xLuLWX",
     "RENDER": "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof",
+    "BRETT": "DxtssVdyYe4wWE5f5zEgx2NqtDFbVL3ABGY62WCycHWg",
+    "MOODENG": "ED5nyyWEzpPPiWimP8vYm7sD7TD3LAt3Q3gRTWHzPJBY",
+    "GIGA": "63LfDmNb3MQ8mw9MtZ2To9bEA2M71kZUUGq5tiJxcqj9",
+    "PNUT": "2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump",
+    "FARTCOIN": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
+    "DOG": "21CnrFRqvEVkQZUTFmTXjcsJTLZhRY51ohoaCPwRpump",
+    "TURBO": "2Dyzu65QA9zdX1UeE7Gx71k7fiwyUK6sZdrvJ7auq5wm",
+    "MICH": "AywAYdNJnSLSXwKWYxDciPjqGRnwp4iZdQptuuQTpump",
 }
 
 TOKEN_DECIMALS: dict[str, int] = {
@@ -47,6 +55,14 @@ TOKEN_DECIMALS: dict[str, int] = {
     "SAMO": 9,
     "FIDA": 6,
     "RENDER": 8,
+    "BRETT": 6,
+    "MOODENG": 6,
+    "GIGA": 5,
+    "PNUT": 6,
+    "FARTCOIN": 6,
+    "DOG": 6,
+    "TURBO": 8,
+    "MICH": 6,
 }
 
 

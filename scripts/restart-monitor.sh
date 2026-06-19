@@ -34,6 +34,11 @@ COMPOSE=(
   -f infra/compose/docker-compose.monitoring.yml
 )
 
+if [[ -f infra/compose/docker-compose.vps.override.yml ]]; then
+  COMPOSE+=(-f infra/compose/docker-compose.vps.override.yml)
+  log "Using VPS compose override (docker-compose.vps.override.yml)"
+fi
+
 missing_enc=0
 for enc in \
   private_key.enc.yaml \
@@ -61,8 +66,13 @@ if ! "${COMPOSE[@]}" config --quiet 2>>"$LOGFILE"; then
   exit 1
 fi
 
+log "Stopping existing monitor container (if any)..."
+docker rm -f "$CONTAINER" 2>/dev/null || true
+sleep 2
+
 log "Clearing stale Redis singleton lock (if present)..."
 node scripts/clear-singleton-lock.mjs 2>/dev/null || true
+sleep 1
 
 log "Restarting services..."
 "${COMPOSE[@]}" up --build -d --remove-orphans 2>&1 | tee -a "$LOGFILE"
@@ -85,9 +95,6 @@ if [[ "$healthy" != 1 ]]; then
   docker inspect -f '{{json .State.Health}}' "$CONTAINER" 2>/dev/null | tee -a "$LOGFILE" || true
   exit 1
 fi
-
-log "Tailing logs in background → $LOGFILE"
-docker logs -f "$CONTAINER" --tail 100 >>"$LOGFILE" 2>&1 &
 
 log "Restart completed successfully. Log: $LOGFILE"
 log "Follow: npm run logs:tail  |  npm run compose:logs"

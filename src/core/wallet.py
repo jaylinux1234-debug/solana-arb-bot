@@ -366,6 +366,128 @@ async def transfer_sol(amount_sol: float, destination: str) -> dict[str, Any]:
         return {"success": False, "error": str(exc)}
 
 
+async def transfer_usdc(amount_usdc: float, destination: str) -> dict[str, Any]:
+    """Send SPL USDC from the hot wallet to ``destination`` (e.g. Backpack deposit)."""
+    from solana.rpc.async_api import AsyncClient
+    from solana.rpc.commitment import Confirmed
+    from solana.rpc.types import TxOpts
+    from solders.message import MessageV0
+    from solders.pubkey import Pubkey
+    from solders.transaction import VersionedTransaction
+    from spl.token.constants import TOKEN_PROGRAM_ID
+    from spl.token.instructions import (
+        TransferCheckedParams,
+        create_idempotent_associated_token_account,
+        get_associated_token_address,
+        transfer_checked,
+    )
+
+    from src.core.rpc_config import call_with_rpc_fallback
+
+    dest = (destination or "").strip()
+    if not dest:
+        return {"success": False, "error": "destination_missing"}
+    amount = float(amount_usdc)
+    if amount <= 0:
+        return {"success": False, "error": "amount_zero"}
+
+    settings = get_settings()
+    if settings.test_mode or settings.simulate:
+        logger.info("TEST: Would transfer %.2f USDC to %s", amount, dest[:12])
+        return {"success": True, "tx_sig": "simulated", "amount_usdc": amount}
+
+    keypair = _load_hot_keypair()
+    if keypair is None:
+        return {"success": False, "error": "signing_keypair_missing"}
+
+    amount_micro = int(round(amount * 1_000_000))
+    if amount_micro < 1:
+        return {"success": False, "error": "amount_micro_zero"}
+
+    on_chain = await get_onchain_usdc_balance()
+    reserve = float(os.getenv("V2_ONCHAIN_USDC_RESERVE", "180"))
+    if on_chain - amount < reserve:
+        return {
+            "success": False,
+            "error": "insufficient_onchain_usdc",
+            "on_chain_usdc": on_chain,
+            "amount_usdc": amount,
+            "reserve_usdc": reserve,
+        }
+
+    try:
+        dest_owner = Pubkey.from_string(dest)
+    except Exception as exc:
+        return {"success": False, "error": f"invalid_destination: {exc}"}
+
+    mint = Pubkey.from_string(USDC_MINT)
+    source_ata = get_associated_token_address(keypair.pubkey(), mint)
+    dest_ata = get_associated_token_address(dest_owner, mint)
+
+    async def _blockhash(rpc: str):
+        async with AsyncClient(rpc) as client:
+            resp = await client.get_latest_blockhash()
+            return resp.value.blockhash
+
+    try:
+        blockhash = await call_with_rpc_fallback(
+            "transaction",
+            _blockhash,
+            label="usdc_transfer_blockhash",
+        )
+        ixs = [
+            create_idempotent_associated_token_account(
+                keypair.pubkey(),
+                dest_owner,
+                mint,
+            ),
+            transfer_checked(
+                TransferCheckedParams(
+                    program_id=TOKEN_PROGRAM_ID,
+                    source=source_ata,
+                    mint=mint,
+                    dest=dest_ata,
+                    owner=keypair.pubkey(),
+                    amount=amount_micro,
+                    decimals=6,
+                    signers=[],
+                )
+            ),
+        ]
+        msg = MessageV0.try_compile(keypair.pubkey(), ixs, [], blockhash)
+        signed = VersionedTransaction(msg, [keypair])
+        raw = bytes(signed)
+
+        async def _send(rpc: str) -> str:
+            async with AsyncClient(rpc) as client:
+                resp = await client.send_raw_transaction(
+                    raw,
+                    opts=TxOpts(skip_preflight=False, preflight_commitment=Confirmed),
+                )
+                return str(resp.value)
+
+        tx_sig = await call_with_rpc_fallback(
+            "transaction",
+            _send,
+            label="usdc_transfer_send",
+        )
+        logger.info(
+            "USDC transfer sent | amount=$%.2f dest=%s… tx=%s",
+            amount,
+            dest[:12],
+            tx_sig,
+        )
+        return {
+            "success": True,
+            "tx_sig": tx_sig,
+            "amount_usdc": amount,
+            "amount_micro": amount_micro,
+        }
+    except Exception as exc:
+        logger.warning("USDC transfer failed: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+
 def get_wallet_pubkey() -> str:
     """
     Effective wallet pubkey for swaps and health checks.
@@ -414,6 +536,12 @@ async def initialize_wallet() -> None:
             sol_cex,
             chain_sol,
         )
+    try:
+        from src.monitoring.cex_health import record_backpack_balances
+
+        record_backpack_balances(usdc, sol_cex)
+    except Exception:
+        pass
 
 _wallet_safety: WalletSafety | None = None
 

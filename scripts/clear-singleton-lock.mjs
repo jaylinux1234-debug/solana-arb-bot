@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 
 const KEYS = [
   process.env.BOT_SINGLETON_NEXTLEVEL_KEY || "bot:singleton:nextlevel",
+  process.env.V2_SINGLETON_KEY || "bot:singleton:v2",
   process.env.BOT_SINGLETON_ID
     ? `bot:singleton:${process.env.BOT_SINGLETON_ID}`
     : "bot:singleton:solana-arb-monitor",

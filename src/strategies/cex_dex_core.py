@@ -250,10 +250,21 @@ def dynamic_min_trade_usdc_micro(
     *,
     settings: Settings | None = None,
 ) -> int:
-    """Floor trade size in micro-USDC; scales with gross edge (800k micro per bps)."""
+    """Floor trade size in micro-USDC; scales with gross edge using env-tunable slope/cap."""
     cfg = settings or get_settings()
     base = int(cfg.CEX_DEX_MIN_TRADE_USDC_MICRO)
-    scaled = int(abs(float(gross_bps)) * 800_000)
+    try:
+        per_bps_micro = int(float(os.getenv("CEX_DEX_DYNAMIC_MIN_TRADE_PER_BPS_MICRO", "600000")))
+    except (TypeError, ValueError):
+        per_bps_micro = 600_000
+    scaled = int(abs(float(gross_bps)) * max(1, per_bps_micro))
+    cap_raw = (os.getenv("CEX_DEX_DYNAMIC_MIN_TRADE_CAP_MICRO") or "").strip()
+    if cap_raw:
+        try:
+            cap = max(base, int(cap_raw))
+            scaled = min(scaled, cap)
+        except ValueError:
+            pass
     return max(base, scaled)
 
 

@@ -1,7 +1,11 @@
 {
   "uid": "solana-arb-bot",
   "title": "Solana Arb Bot — Production",
-  "tags": ["solana", "arb", "monitor"],
+  "tags": [
+    "solana",
+    "arb",
+    "monitor"
+  ],
   "timezone": "browser",
   "refresh": "15s",
   "panels": [
@@ -9,23 +13,59 @@
       "title": "Bot Up",
       "type": "stat",
       "datasource": "Prometheus",
-      "targets": [{ "expr": "solana_bot_up", "legendFormat": "up" }],
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 }
+      "targets": [
+        {
+          "expr": "solana_bot_up",
+          "legendFormat": "up"
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      }
     },
     {
       "title": "On-chain USDC balance",
       "type": "stat",
       "datasource": "Prometheus",
-      "targets": [{ "expr": "onchain_usdc_balance", "legendFormat": "USDC" }],
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 }
+      "targets": [
+        {
+          "expr": "onchain_usdc_balance",
+          "legendFormat": "USDC"
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      }
     },
     {
       "title": "V2 fill rate",
       "type": "gauge",
       "datasource": "Prometheus",
-      "targets": [{ "expr": "v2_fill_rate", "legendFormat": "fill rate" }],
-      "fieldConfig": { "defaults": { "min": 0, "max": 1, "unit": "percentunit" } },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 }
+      "targets": [
+        {
+          "expr": "v2_fill_rate",
+          "legendFormat": "fill rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      }
     },
     {
       "title": "RPC connection (by provider)",
@@ -37,7 +77,12 @@
           "legendFormat": "{{provider}}"
         }
       ],
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 }
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      }
     },
     {
       "title": "Trade executions (rate by strategy)",
@@ -49,7 +94,12 @@
           "legendFormat": "{{strategy}} success={{success}}"
         }
       ],
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 }
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      }
     },
     {
       "title": "RPC failures total (by provider)",
@@ -61,7 +111,12 @@
           "legendFormat": "{{provider}}"
         }
       ],
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 }
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      }
     },
     {
       "title": "RPC provider failures (legacy rate)",
@@ -73,8 +128,33 @@
           "legendFormat": "{{provider}}"
         }
       ],
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 }
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      }
+    },
+    {
+      "title": "CEX-DEX probe->exec decay (bps)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "cex_dex_probe_exec_decay_bps",
+          "legendFormat": "{{pair}}"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      }
     }
   ],
-  "time": { "from": "now-6h", "to": "now" }
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  }
 }

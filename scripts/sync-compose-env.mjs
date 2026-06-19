@@ -66,6 +66,16 @@ const SYNC_KEYS = new Set([
   "CEX_MAX_BOOK_SPREAD_BPS",
   "CEX_DEX_ORACLE_POLL_MIN_SEC",
   "CEX_DEX_ORACLE_POLL_MAX_SEC",
+  "CEX_DEX_EXEC_SCAN_TOP_N",
+  "CEX_DEX_EXEC_SIZE_LADDER",
+  "CEX_DEX_DYNAMIC_MIN_TRADE_PER_BPS_MICRO",
+  "CEX_DEX_DYNAMIC_MIN_TRADE_CAP_MICRO",
+  "CEX_DEX_MODEL_NET_SOFT_RESCUE",
+  "CEX_DEX_MODEL_NET_SOFT_RESCUE_MIN_GROSS_BPS",
+  "CEX_DEX_PARALLEL_SCAN",
+  "CEX_DEX_FOCUS_SCAN_SYMBOLS",
+  "CEX_DEX_VOL_SKIP_MAX_GROSS_BPS",
+  "CEX_MIN_BOOK_DEPTH_MULT",
   "ML_REAL_FILLS_APPROVE_GATE",
   "CEX_MIDCAPS",
   "CEX_MAX_MIDCAPS",
@@ -260,7 +270,7 @@ function parseEnv(text) {
     if (eq < 1) continue;
     const key = trimmed.slice(0, eq).trim();
     const value = trimmed.slice(eq + 1).trim();
-    if (SYNC_KEYS.has(key)) out.set(key, value);
+    if (SYNC_KEYS.has(key) || key.startsWith("PAIR_MAX_SIZE_")) out.set(key, value);
   }
   return out;
 }
@@ -281,8 +291,7 @@ const lines = [
 /** Keys where empty string is meaningful (e.g. SOL-only: no midcaps). */
 const ALLOW_EMPTY = new Set(["CEX_MIDCAPS"]);
 
-for (const key of [...SYNC_KEYS]) {
-  if (!parsed.has(key)) continue;
+for (const key of [...parsed.keys()].sort()) {
   const value = parsed.get(key);
   if (value || ALLOW_EMPTY.has(key)) lines.push(`${key}=${value ?? ""}`);
 }

@@ -149,8 +149,13 @@ def reclaim_stale_lock(
     key: str,
     *,
     log: logging.Logger | None = None,
+    our_token: str | None = None,
 ) -> bool:
-    """Delete lock when holder PID is dead. Returns True if key was cleared."""
+    """Delete lock when holder PID is dead or same process with a stale token.
+
+    Docker restarts often reuse pid=1; a leftover Redis token then looks like a
+    live holder and blocks acquisition until TTL expiry.
+    """
     log = log or logger
     if not client.exists(key):
         return False
@@ -160,6 +165,14 @@ def reclaim_stale_lock(
         log.warning("Singleton lock %s has non-PID holder %r — not reclaiming", key, holder)
         return False
     if pid_alive(pid):
+        if pid == os.getpid() and holder != our_token:
+            client.delete(key)
+            log.info(
+                "Reclaimed singleton lock %s (same pid=%s, stale token)",
+                key,
+                pid,
+            )
+            return True
         return False
     client.delete(key)
     log.info("Reclaimed stale singleton lock %s (dead pid=%s)", key, pid)
@@ -179,6 +192,7 @@ def acquire_with_stealing(
 
     Returns True when this process holds the lock.
     """
+    global _client, _lock_key, _lock_token
     log = log or logger
     url = (redis_url_override or redis_url()).strip()
     if not url:
@@ -199,13 +213,27 @@ def acquire_with_stealing(
         else _env_bool("BOT_SINGLETON_TERMINATE_HOLDER", False)
     )
 
-    reclaim_stale_lock(client, lock_k, log=log)
+    if _lock_token is not None and _lock_key == lock_k:
+        holder = client.get(lock_k)
+        if holder == _lock_token:
+            _start_renew(ttl)
+            log.debug("Next-level singleton already held | key=%s", lock_k)
+            return True
+
+    reclaim_stale_lock(client, lock_k, log=log, our_token=_lock_token)
 
     if client.exists(lock_k):
         holder = client.get(lock_k)
         pid = parse_holder_pid(holder)
         if pid is not None and pid_alive(pid):
-            if do_terminate:
+            if pid == os.getpid():
+                log.info(
+                    "Reclaiming singleton lock %s from same pid=%s before acquire",
+                    lock_k,
+                    pid,
+                )
+                client.delete(lock_k)
+            elif do_terminate:
                 log.warning(
                     "Another instance holds %s (pid=%s) — requesting shutdown",
                     lock_k,
@@ -213,7 +241,7 @@ def acquire_with_stealing(
                 )
                 terminate_pid(pid, log=log)
                 time.sleep(max(1, int(os.getenv("BOT_SINGLETON_TERMINATE_WAIT_SEC", "3"))))
-                reclaim_stale_lock(client, lock_k, log=log)
+                reclaim_stale_lock(client, lock_k, log=log, our_token=_lock_token)
             else:
                 log.info(
                     "Singleton lock held by live pid=%s (%s); waiting for TTL or terminate",
@@ -222,7 +250,6 @@ def acquire_with_stealing(
                 )
 
     if client.set(lock_k, token, nx=True, ex=ttl):
-        global _client, _lock_key, _lock_token
         _client = client
         _lock_key = lock_k
         _lock_token = token
@@ -244,6 +271,12 @@ def _renew_lock(ttl: int, renew_ex: int) -> bool:
         _client.set(_lock_key, _lock_token, ex=renew_ex)
         logger.debug("Singleton lock renewed")
         return True
+    if holder is None:
+        if _client.set(_lock_key, _lock_token, nx=True, ex=renew_ex):
+            logger.warning("SINGLETON_LOCK_LOST — re-acquired after key expiry")
+            return True
+        logger.debug("Singleton key missing; re-acquire lost race")
+        return False
     our_pid = os.getpid()
     holder_pid = parse_holder_pid(holder)
     if holder_pid == our_pid:

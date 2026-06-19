@@ -295,6 +295,14 @@ class Settings(BaseSettings):
             self.HELIUS_WEBHOOK_PUBLIC_URL or self.helius_webhook_public_url or "",
         )
 
+        max_flash_usdc = float(self.MAX_FLASH_USDC)
+        v2_max_raw = (os.getenv("V2_MAX_FLASH_USDC") or "").strip()
+        if v2_max_raw:
+            try:
+                max_flash_usdc = float(v2_max_raw)
+            except ValueError:
+                pass
+
         trading = TradingSettings(
             min_net_profit_bps=int(self.MIN_NET_PROFIT_BPS),
             cex_dex_min_gross_spread_bps=int(self.CEX_DEX_MIN_GROSS_SPREAD_BPS),
@@ -305,7 +313,7 @@ class Settings(BaseSettings):
             max_live_trades_per_hour=int(self.MAX_LIVE_TRADES_PER_HOUR),
             dynamic_amount=bool(self.DYNAMIC_AMOUNT),
             min_flash_usdc=float(self.MIN_FLASH_USDC),
-            max_flash_usdc=float(self.MAX_FLASH_USDC),
+            max_flash_usdc=max_flash_usdc,
             flash_size_utilization=float(self.FLASH_SIZE_UTILIZATION),
             max_drawdown_pct=float(self.MAX_DRAWDOWN_PCT),
             max_inventory_sol=float(self.INVENTORY_MAX_SOL),

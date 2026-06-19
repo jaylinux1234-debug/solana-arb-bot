@@ -78,7 +78,7 @@ COPY scripts/docker-entrypoint.sh scripts/docker_healthcheck.py scripts/healthch
     scripts/next_level_metrics.py scripts/auto_tuner.py \
     scripts/usdc_inventory_sync.py scripts/breakeven_sim.py \
     scripts/singleton_guard.py scripts/validate-secrets.py \
-    scripts/v2_withdraw_usdc.py scripts/v2_wallet_balance.py ./scripts/
+    scripts/v2_withdraw_usdc.py scripts/v2_wallet_balance.py scripts/v2_deposit_usdc_to_backpack.py ./scripts/
 RUN chmod +x scripts/docker-entrypoint.sh
 
 RUN mkdir -p logs backtest_results pnl_data \

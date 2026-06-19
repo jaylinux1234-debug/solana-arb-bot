@@ -72,6 +72,7 @@ sed \
   -e "s|/path/to/solana-arb-bot|$ROOT|g" \
   -e "s|^User=root|User=$RUN_USER|" \
   -e "s|ExecStartPre=.*|ExecStartPre=$NPM_BIN run sync:compose-env|" \
+  -e "s|SOPS_AGE_KEY_FILE=/path/to/solana-arb-bot/secrets/.local/sops_age_key|SOPS_AGE_KEY_FILE=$ROOT/secrets/.local/sops_age_key|" \
   "$TEMPLATE" >"$UNIT_PATH"
 
 chmod 644 "$UNIT_PATH"

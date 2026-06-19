@@ -1,0 +1,4 @@
+# VPS: Docker secret mounts are root-readable only; monitor runs as root for SOPS decrypt.
+services:
+  monitor:
+    user: "0:0"

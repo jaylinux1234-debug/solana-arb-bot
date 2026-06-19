@@ -18,6 +18,8 @@ from src.cex.backpack import BackpackClient
 from src.cex.trading_pairs import CexDexPair, load_cex_dex_pairs
 from src.config.settings import Settings, get_settings
 from src.core.risk import RiskEngine
+from src.core.sizing import calculate_trade_size as sizing_calculate_trade_size
+from src.core.sizing import get_max_trade_size_micro
 from src.core.wallet import get_onchain_usdc_balance
 from src.dex.jupiter import SOL_MINT, USDC_MINT, JupiterClient
 from src.dex.jupiter_params import quote_route_hops, resolve_slippage_bps
@@ -34,6 +36,7 @@ from src.monitoring.near_miss_log import append_cex_dex_near_miss
 from src.monitoring.metrics import (
     record_cex_dex_near_miss,
     record_execution_slippage,
+    record_probe_exec_decay,
     record_trade_execution,
     record_trade_opportunity,
     record_trade_signal,
@@ -175,6 +178,7 @@ class CexDexStrategy:
         self.base_cost_bps = float(self.settings.CEX_DEX_STRATEGY_BASE_COST_BPS)
         self._proven_midcaps = _load_proven_midcaps()
         self._pairs = self._load_tradeable_pairs()
+        self._scan_priority_symbol: str | None = None
         logger.info(
             "CEX-DEX pairs | count=%d proven_midcaps=%s symbols=%s",
             len(self._pairs),
@@ -275,6 +279,10 @@ class CexDexStrategy:
 
         if base not in self._proven_midcaps:
             return False
+
+        priority = getattr(self, "_scan_priority_symbol", None)
+        if priority and base.upper() == str(priority).strip().upper():
+            return True
 
         depth = await self.backpack.get_depth(backpack_symbol, limit=20)
         if not depth or self._is_thin_book(depth):
@@ -501,20 +509,94 @@ class CexDexStrategy:
                 logger.debug("Phoenix-enhanced probe skipped: %s", exc)
         return jup_price
 
-    async def _quick_gross_bps(self) -> float:
-        """Lightweight gross spread probe for vol gate (primary pair only)."""
-        pair = self._pairs[0] if self._pairs else None
-        if pair is None:
+    async def _jupiter_price_for_cex_buy(
+        self,
+        pair: CexDexPair,
+        size_micro: int,
+        cex_buy: float,
+    ) -> float | None:
+        """Implied DEX USDC/base for a CEX buy leg at ``size_micro`` (sell quote preferred)."""
+        sell_px, _ = await self.jupiter.get_implied_usdc_per_base_sell(
+            size_micro,
+            pair.base_mint,
+            float(cex_buy),
+            base_decimals=pair.base_decimals,
+        )
+        if sell_px and sell_px > 0:
+            return float(sell_px)
+        slippage = resolve_slippage_bps(USDC_MINT, pair.base_mint)
+        px, _ = await self.jupiter.get_implied_usdc_per_base(
+            size_micro,
+            pair.base_mint,
+            base_decimals=pair.base_decimals,
+            slippage_bps=slippage,
+        )
+        return float(px) if px and px > 0 else None
+
+    async def _quick_gross_bps(self, pair: CexDexPair | None = None) -> float:
+        """Lightweight gross spread probe for vol gate (one pair)."""
+        target = pair or (self._pairs[0] if self._pairs else None)
+        if target is None:
             return 0.0
-        cex_buy, _, _ = await self.backpack.get_cex_buy_reference_price(pair.backpack_symbol)
+        cex_buy, _, _ = await self.backpack.get_cex_buy_reference_price(target.backpack_symbol)
         if not cex_buy or cex_buy <= 0:
             return 0.0
-        jup_price = await self._probe_jupiter_sell_price(pair, float(cex_buy))
+        jup_price = await self._probe_jupiter_sell_price(target, float(cex_buy))
         if not jup_price or jup_price <= 0:
             return 0.0
         from src.utils.price import bps_diff
 
         return abs(float(bps_diff(cex_buy, jup_price)))
+
+    def _focus_scan_symbols(self) -> set[str] | None:
+        """Liquid pairs for detect loop; ``all`` / empty disables focus filter."""
+        raw = os.getenv(
+            "CEX_DEX_FOCUS_SCAN_SYMBOLS", "SOL,BONK,WIF,POPCAT,MEW,PNUT"
+        ).strip()
+        if raw.lower() in ("", "all", "*", "none", "false", "0"):
+            return None
+        return {s.strip().upper() for s in raw.split(",") if s.strip()}
+
+    def _pairs_for_scan(self, priority_symbol: str | None = None) -> list[CexDexPair]:
+        """Scan order: vol-gate best pair first, optional liquid-only filter."""
+        focus = self._focus_scan_symbols()
+        pairs = list(self._pairs)
+        if focus is not None:
+            pairs = [p for p in pairs if p.symbol.upper() in focus]
+        if priority_symbol:
+            pri = priority_symbol.strip().upper()
+            pairs.sort(key=lambda p: 0 if p.symbol.upper() == pri else 1)
+        return pairs
+
+    async def _rank_pairs_by_probe(self) -> list[tuple[CexDexPair, float]]:
+        """Rank scan pairs by fresh probe gross edge (descending)."""
+        ranked: list[tuple[CexDexPair, float]] = []
+        for pair in self._pairs_for_scan():
+            try:
+                gross = await self._quick_gross_bps(pair)
+            except Exception as exc:
+                logger.debug("Vol gate probe skipped for %s: %s", pair.symbol, exc)
+                gross = 0.0
+            ranked.append((pair, gross))
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        return ranked
+
+    async def _max_gross_across_pairs(self) -> tuple[float, str]:
+        """Max gross bps across configured pairs (vol gate uses best edge, not SOL-only)."""
+        max_gross = 0.0
+        best_pair = self._pairs[0].symbol if self._pairs else "SOL"
+
+        for pair in self._pairs:
+            try:
+                gross = await self._quick_gross_bps(pair)
+            except Exception as exc:
+                logger.debug("Vol gate probe skipped for %s: %s", pair.symbol, exc)
+                continue
+            if gross > max_gross:
+                max_gross = gross
+                best_pair = pair.symbol
+
+        return max_gross, best_pair
 
     async def run_cycle(self) -> bool:
         """Main strategy cycle — CEX-DEX scan, smart path execute, then reverse fallback."""
@@ -525,22 +607,45 @@ class CexDexStrategy:
 
         gates = await self.vol_gate.get_adaptive_gates()
         vol_5m = await self.vol_gate.get_5min_volatility()
-        current_gross = await self._quick_gross_bps()
-        if should_skip_low_vol_cycle(vol_5m, current_gross):
-            logger.debug(
-                "Cycle skipped (low vol) | vol_5m=%s gross_bps=%.2f",
-                vol_5m,
-                current_gross,
-            )
+        ranked_pairs = await self._rank_pairs_by_probe()
+        max_gross = ranked_pairs[0][1] if ranked_pairs else 0.0
+        best_pair = ranked_pairs[0][0].symbol if ranked_pairs else "SOL"
+        if should_skip_low_vol_cycle(vol_5m, max_gross, best_pair=best_pair):
             return False
 
+        scan_pairs = [pair for pair, _ in ranked_pairs]
+        top_n = _env_int("CEX_DEX_EXEC_SCAN_TOP_N", 3)
+        if top_n > 0:
+            scan_pairs = scan_pairs[:top_n]
+
+        logger.info(
+            "Vol gate pass | vol_5m=%.3f%% max_gross=%.2f bps best_pair=%s",
+            float(vol_5m or 0.0),
+            max_gross,
+            best_pair,
+        )
+
+        logger.info(
+            "Starting multi-pair scan | pairs=%d liquid_scan=%d exec_scan=%d",
+            len(self._pairs),
+            len(self._pairs_for_scan(best_pair)),
+            len(scan_pairs),
+        )
         logger.info(
             "Adaptive gates: %s | vol=%.2f%%",
             gates.get("mode"),
             vol_5m,
         )
 
-        opportunity = await self._scan_cex_dex_opportunity(gates)
+        self._scan_priority_symbol = best_pair
+        try:
+            opportunity = await self._scan_cex_dex_opportunity(
+                gates,
+                priority_symbol=best_pair,
+                scan_pairs=scan_pairs,
+            )
+        finally:
+            self._scan_priority_symbol = None
         if opportunity:
             result = await self._execute_smart_path(opportunity)
             logged = await self._log_trade(result)
@@ -562,19 +667,19 @@ class CexDexStrategy:
             return True
         return False
 
-    async def _scan_cex_dex_opportunity(self, gates: dict[str, Any]) -> dict[str, Any] | None:
-        """Scan SOL/USDC with adaptive gates; returns execution-ready opportunity dict."""
-        pair = next((p for p in self._pairs if p.symbol.upper() == "SOL"), None)
-        if pair is None and self._pairs:
-            pair = self._pairs[0]
-        if pair is None:
-            return None
-
-        _, _, cex_ask = await self.backpack.get_cex_buy_reference_price(
-            pair.backpack_symbol
+    async def _scan_cex_dex_opportunity(
+        self,
+        gates: dict[str, Any],
+        *,
+        priority_symbol: str | None = None,
+        scan_pairs: list[CexDexPair] | None = None,
+    ) -> dict[str, Any] | None:
+        """Scan all configured pairs; return best execution-ready opportunity."""
+        opp = await self.detect_opportunity(
+            gates,
+            priority_symbol=priority_symbol,
+            scan_pairs=scan_pairs,
         )
-
-        opp = await self._detect_pair_opportunity(pair, gates=gates)
         if opp is None:
             return None
 
@@ -590,14 +695,17 @@ class CexDexStrategy:
                 float(opp.get("net_bps") or 0),
                 ai_conf,
                 "ai_conf_below_gate",
-                pair=pair.pair_label,
+                pair=str(opp.get("pair_label") or ""),
             )
             return None
 
         opp["type"] = "cex_dex"
         opp["ai_conf"] = ai_conf
         opp["path"] = "smart"
-        opp["cex_ask"] = cex_ask
+        if not opp.get("cex_ask"):
+            backpack_symbol = str(opp.get("backpack_symbol") or "SOL_USDC")
+            _, _, cex_ask = await self.backpack.get_cex_buy_reference_price(backpack_symbol)
+            opp["cex_ask"] = cex_ask
         return opp
 
     async def _execute_smart_path(self, opp: dict[str, Any]) -> dict[str, Any]:
@@ -666,9 +774,15 @@ class CexDexStrategy:
             logger.info("BLOCKED | reason=%s", result.get("status"))
         return entry
 
-    async def detect_opportunity(self) -> dict[str, Any] | None:
+    async def detect_opportunity(
+        self,
+        gates: dict[str, Any] | None = None,
+        *,
+        priority_symbol: str | None = None,
+        scan_pairs: list[CexDexPair] | None = None,
+    ) -> dict[str, Any] | None:
         """Scan all configured pairs; return best ``cex_cheap`` opportunity by net bps."""
-        gates = await self.get_dynamic_gates()
+        gates = gates or await self.get_dynamic_gates()
         mode = str(gates.get("mode") or "strict")
         if mode in ("opportunistic", "aggressive", "strict"):
             logger.info(
@@ -681,17 +795,39 @@ class CexDexStrategy:
                 float(gates.get("roundtrip_min", 0)),
             )
 
+        scan_pairs = list(scan_pairs) if scan_pairs is not None else self._pairs_for_scan(priority_symbol)
+        focus = self._focus_scan_symbols()
+        if priority_symbol:
+            logger.info(
+                "Scan order | priority=%s focus=%s pairs=%d",
+                priority_symbol,
+                ",".join(sorted(focus)) if focus else "all",
+                len(scan_pairs),
+            )
+
         best: dict[str, Any] | None = None
-        for pair in self._pairs:
+        parallel = self._env_bool("CEX_DEX_PARALLEL_SCAN", True)
+
+        async def _scan_pair(pair: CexDexPair) -> dict[str, Any] | None:
             if not await self.should_trade_pair(pair):
-                continue
+                return None
             try:
-                opp = await self._detect_pair_opportunity(pair, gates=gates)
+                return await self._detect_pair_opportunity(pair, gates=gates)
             except Exception as exc:
                 logger.debug("CEX-DEX scan %s failed: %s", pair.symbol, exc)
-                continue
-            if opp is None:
-                continue
+                return None
+
+        if parallel and len(scan_pairs) > 1:
+            results = await asyncio.gather(*[_scan_pair(p) for p in scan_pairs])
+            candidates = [r for r in results if r is not None]
+        else:
+            candidates = []
+            for pair in scan_pairs:
+                opp = await _scan_pair(pair)
+                if opp is not None:
+                    candidates.append(opp)
+
+        for opp in candidates:
             if best is None or float(opp["net_bps"]) > float(best["net_bps"]):
                 best = opp
         if best:
@@ -703,6 +839,78 @@ class CexDexStrategy:
                 int(best["size_usdc"]) / 1e6,
                 best.get("confidence"),
             )
+        return best
+
+    def _trade_min_micro(self) -> int:
+        """Resolve minimum trade floor with direct CEX-DEX override when set."""
+        raw = (os.getenv("CEX_DEX_MIN_TRADE_USDC_MICRO") or "").strip()
+        if raw:
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                pass
+        return int(self.settings.trading.min_flash_usdc * 1_000_000)
+
+    def _exec_size_ladder(self, symbol: str, initial_size_micro: int) -> list[int]:
+        """Candidate execution sizes from largest to smallest for quote decay handling."""
+        min_trade = self._trade_min_micro()
+        max_trade = self._max_trade_usdc_micro(symbol)
+        start = max(min_trade, min(max_trade, int(initial_size_micro)))
+
+        raw = (os.getenv("CEX_DEX_EXEC_SIZE_LADDER") or "1.0,0.75,0.5,0.35").strip()
+        multipliers: list[float] = []
+        for part in raw.split(","):
+            token = part.strip()
+            if not token:
+                continue
+            try:
+                mult = float(token)
+            except ValueError:
+                continue
+            if mult > 0:
+                multipliers.append(mult)
+        if not multipliers:
+            multipliers = [1.0, 0.75, 0.5, 0.35]
+
+        candidates: list[int] = []
+        for mult in multipliers:
+            sized = int(start * mult)
+            clamped = max(min_trade, min(max_trade, sized))
+            if clamped not in candidates:
+                candidates.append(clamped)
+        return candidates
+
+    async def _best_exec_quote(
+        self,
+        pair: CexDexPair,
+        cex_buy: float,
+        *,
+        initial_size_micro: int,
+    ) -> dict[str, float] | None:
+        """Pick the size/quote combination with best modeled net for cex_cheap direction."""
+        best: dict[str, float] | None = None
+        for candidate_size in self._exec_size_ladder(pair.symbol, initial_size_micro):
+            exec_jup = await self._jupiter_price_for_cex_buy(pair, candidate_size, float(cex_buy))
+            if not exec_jup or exec_jup <= 0:
+                continue
+            spread = analyze_cex_dex_spread(cex_buy, exec_jup)
+            if spread is None or spread.direction != "cex_cheap":
+                continue
+            edge_bps = float(bps_diff(cex_buy, exec_jup))
+            net_bps = net_spread_bps_after_costs(
+                edge_bps,
+                candidate_size,
+                direction="cex_cheap",
+            )
+            candidate = {
+                "size_usdc_micro": float(candidate_size),
+                "jup_price": float(exec_jup),
+                "edge_bps": float(edge_bps),
+                "net_bps": float(net_bps),
+                "spread_abs_bps": float(spread.spread_bps_abs),
+            }
+            if best is None or candidate["net_bps"] > best["net_bps"]:
+                best = candidate
         return best
 
     async def _detect_pair_opportunity(
@@ -719,7 +927,7 @@ class CexDexStrategy:
         if cex_buy and cex_buy > 0:
             from src.strategies.volatility_gate import record_cex_price
 
-            record_cex_price(float(cex_buy))
+            record_cex_price(float(cex_buy), symbol=pair.symbol)
         if not cex_buy or cex_buy <= 0:
             return None
 
@@ -763,6 +971,7 @@ class CexDexStrategy:
         edge_bps = float(bps_diff(cex_buy, jup_price))
         spread_abs = spread.spread_bps_abs
         gross_bps = edge_bps if spread.direction == "cex_cheap" else spread_abs
+        probe_edge_bps = float(edge_bps)
 
         scan_ctx: dict[str, Any] = {
             "symbol": pair.symbol,
@@ -804,16 +1013,31 @@ class CexDexStrategy:
                 )
             return None
 
-        size_usdc = await self._calculate_size(int(gross_bps), cex_buy)
-        size_usdc = self._clamp_opportunity_size(size_usdc)
-        # Recompute edge/net at execution size using buy (ask) price.
-        edge_bps = float(bps_diff(cex_buy, jup_price))
-        gross_bps = edge_bps
-        net_bps = net_spread_bps_after_costs(
-            gross_bps,
-            size_usdc,
-            direction="cex_cheap",
+        base_size_usdc = await self._calculate_size(int(gross_bps), cex_buy, pair.symbol)
+        base_size_usdc = self._clamp_opportunity_size(base_size_usdc, pair.symbol)
+        best_exec = await self._best_exec_quote(
+            pair,
+            cex_buy,
+            initial_size_micro=base_size_usdc,
         )
+        if best_exec is None:
+            return None
+        size_usdc = int(best_exec["size_usdc_micro"])
+        jup_price = float(best_exec["jup_price"])
+        edge_bps = float(best_exec["edge_bps"])
+        spread_abs = float(best_exec["spread_abs_bps"])
+        gross_bps = edge_bps
+        net_bps = float(best_exec["net_bps"])
+        if size_usdc < base_size_usdc:
+            logger.info(
+                "Exec size adjusted | pair=%s base_usdc=%.2f tuned_usdc=%.2f exec_edge=%.1f net=%.1f",
+                pair.pair_label,
+                base_size_usdc / 1_000_000.0,
+                size_usdc / 1_000_000.0,
+                edge_bps,
+                net_bps,
+            )
+
         min_trade_micro = dynamic_min_trade_usdc_micro(
             gross_bps,
             settings=self.settings,
@@ -852,9 +1076,10 @@ class CexDexStrategy:
 
         cost_bps = modeled_roundtrip_cost_bps(size_usdc)
         logger.info(
-            "CEX-DEX Scan | pair=%s edge_bps=%.1f spread_abs=%.1f cost_bps=%.1f net_bps=%.1f "
-            "dir=%s confidence=%.1f size_usdc=%d probe=%d",
+            "CEX-DEX Scan | pair=%s probe_edge=%.1f exec_edge=%.1f spread_abs=%.1f "
+            "cost_bps=%.1f net_bps=%.1f dir=%s confidence=%.1f size_usdc=%d probe=%d",
             pair.pair_label,
+            probe_edge_bps,
             edge_bps,
             spread_abs,
             cost_bps,
@@ -864,41 +1089,88 @@ class CexDexStrategy:
             size_usdc,
             probe_micro,
         )
+        record_probe_exec_decay(pair.pair_label, probe_edge_bps, edge_bps)
 
-        if not self._is_sane_opportunity(edge_bps, net_bps, size_usdc):
+        if not self._is_sane_opportunity(edge_bps, net_bps, size_usdc, pair.symbol):
             self.log_near_miss(
                 edge_bps, net_bps, confidence, "sanity_reject", pair=pair.pair_label
             )
             return None
 
         if not self._is_profitable_opportunity(edge_bps, net_bps, confidence, gates=gates):
-            if self.settings.CEX_DEX_AGGRESSIVE_OPPORTUNITY_FILTER:
-                self.log_near_miss(
-                    edge_bps,
-                    net_bps,
-                    confidence,
-                    "aggressive_filter",
-                    pair=pair.pair_label,
+            rescue_enabled = _env_bool("CEX_DEX_MODEL_NET_SOFT_RESCUE", True)
+            min_gross_gate = float(gates.get("min_gross", self.settings.CEX_DEX_MIN_GROSS_SPREAD_BPS))
+            rescue_floor = float(
+                os.getenv(
+                    "CEX_DEX_MODEL_NET_SOFT_RESCUE_MIN_GROSS_BPS",
+                    str(max(min_gross_gate, 8.0)),
                 )
-            else:
-                missed = {
-                    "gross_bps": edge_bps,
-                    "net_bps": net_bps,
-                    "ai_confidence": confidence,
-                    "direction": spread.direction,
-                    "size_usdc_micro": size_usdc,
-                    "pair_label": pair.pair_label,
-                }
-                if not self.should_log_near_miss(missed, gates=gates):
-                    reason = (
-                        f"env_thresholds_{gates.get('mode', 'strict')}"
-                        if gates.get("mode") == "opportunistic"
-                        else "env_thresholds"
+            )
+            if (
+                rescue_enabled
+                and pair.symbol == "SOL"
+                and edge_bps >= rescue_floor
+                and not self.settings.test_mode
+                and not self.settings.simulate
+            ):
+                sim_ok, sim_net, sim_reason, _ = await pre_simulate_cex_buy_dex_sell(
+                    self.jupiter,
+                    int(size_usdc),
+                    float(cex_buy),
+                    base_mint=pair.base_mint,
+                    base_decimals=pair.base_decimals,
+                    expected_net_bps=float(net_bps),
+                    probe_usdc_micro=self._probe_usdc_micro(),
+                    min_net_bps=roundtrip_sim_min_net_bps(),
+                )
+                if sim_ok:
+                    logger.info(
+                        "MODEL_NET_SOFT_RESCUE | pair=%s edge=%.1f modeled_net=%.1f sim_net=%.1f",
+                        pair.pair_label,
+                        edge_bps,
+                        net_bps,
+                        sim_net,
                     )
+                    net_bps = max(net_bps, float(sim_net))
+                else:
+                    logger.info(
+                        "MODEL_NET_SOFT_RESCUE_SKIP | pair=%s edge=%.1f reason=%s",
+                        pair.pair_label,
+                        edge_bps,
+                        sim_reason,
+                    )
+            if not self._is_profitable_opportunity(edge_bps, net_bps, confidence, gates=gates):
+                if self.settings.CEX_DEX_AGGRESSIVE_OPPORTUNITY_FILTER:
                     self.log_near_miss(
-                        edge_bps, net_bps, confidence, reason, pair=pair.pair_label
+                        edge_bps,
+                        net_bps,
+                        confidence,
+                        "aggressive_filter",
+                        pair=pair.pair_label,
                     )
-            return None
+                else:
+                    missed = {
+                        "gross_bps": edge_bps,
+                        "net_bps": net_bps,
+                        "ai_confidence": confidence,
+                        "direction": spread.direction,
+                        "size_usdc_micro": size_usdc,
+                        "pair_label": pair.pair_label,
+                    }
+                    if not self.should_log_near_miss(missed, gates=gates):
+                        reason = (
+                            f"env_thresholds_{gates.get('mode', 'strict')}"
+                            if gates.get("mode") == "opportunistic"
+                            else "env_thresholds"
+                        )
+                        self.log_near_miss(
+                            edge_bps,
+                            net_bps,
+                            confidence,
+                            reason,
+                            pair=pair.pair_label,
+                        )
+                return None
 
         if (
             pair.symbol == "SOL"
@@ -969,19 +1241,22 @@ class CexDexStrategy:
         safe_usdc = min(available_usdc, max_usdc)
         return int(max(0.0, safe_usdc) * 1_000_000)
 
-    def _max_trade_usdc_micro(self) -> int:
-        return int(
-            os.getenv(
-                "CEX_DEX_MAX_TRADE_USDC_MICRO",
-                str(int(getattr(self.settings, "CEX_DEX_MAX_TRADE_USDC_MICRO", 25_000_000))),
-            )
-        )
+    def _max_trade_usdc_micro(self, symbol: str | None = None) -> int:
+        sym = (symbol or "SOL").strip().upper()
+        max_micro = get_max_trade_size_micro(sym)
+        global_max = int(self.settings.trading.max_flash_usdc * 1_000_000)
+        return min(max_micro, global_max)
 
-    def _clamp_opportunity_size(self, size_micro: int) -> int:
-        min_micro = int(self.settings.trading.min_flash_usdc * 1_000_000)
+    def _clamp_opportunity_size(self, size_micro: int, symbol: str | None = None) -> int:
+        sym = (symbol or "SOL").strip().upper()
+        min_micro = self._trade_min_micro()
+        flash_cap = min(
+            get_max_trade_size_micro(sym),
+            int(self.settings.trading.max_flash_usdc * 1_000_000),
+        )
         return clamp_trade_usdc_micro(
-            max_trade_usdc_micro=self._max_trade_usdc_micro(),
-            flash_cap_usdc_micro=int(self.settings.trading.max_flash_usdc * 1_000_000),
+            max_trade_usdc_micro=self._max_trade_usdc_micro(symbol),
+            flash_cap_usdc_micro=flash_cap,
             liquidity_cap_usdc_micro=size_micro,
             min_trade_usdc_micro=min_micro,
         )
@@ -991,37 +1266,42 @@ class CexDexStrategy:
         edge_bps: float,
         net_bps: float,
         size_micro: int,
+        symbol: str | None = None,
     ) -> bool:
         """Reject fantasy spreads/sizes from bad quotes or stale config."""
         max_net = float(os.getenv("CEX_DEX_MAX_MODELED_NET_BPS", "80"))
         max_gross = float(os.getenv("CEX_DEX_MAX_MODELED_GROSS_BPS", "120"))
         if edge_bps > max_gross or net_bps > max_net:
             return False
-        if size_micro <= 0 or size_micro > self._max_trade_usdc_micro():
+        if size_micro <= 0 or size_micro > self._max_trade_usdc_micro(symbol):
             return False
         return True
 
-    async def _calculate_size(self, gross_bps: int, cex_price: float) -> int:
-        """Dynamic position sizing (USDC micro-units), scaled by gross edge not modeled net."""
-        _ = cex_price
-        base_size = int(
-            self.settings.trading.max_flash_usdc
-            * self.settings.trading.flash_size_utilization
-            * 1_000_000
+    def calculate_trade_size(self, pair_symbol: str, gross_bps: float) -> int:
+        """Per-pair cap with edge scaling (delegates to src.core.sizing)."""
+        return sizing_calculate_trade_size(
+            pair_symbol,
+            gross_bps,
+            global_max_usdc=float(self.settings.trading.max_flash_usdc),
         )
-        edge_factor = min(1.2, max(0.5, float(gross_bps) / 25.0))
-        size = int(base_size * edge_factor)
-        min_micro = int(self.settings.trading.min_flash_usdc * 1_000_000)
-        max_micro = int(self.settings.trading.max_flash_usdc * 1_000_000)
-        size = max(min_micro, min(max_micro, size))
+
+    async def _calculate_size(
+        self,
+        gross_bps: int,
+        cex_price: float,
+        symbol: str | None = None,
+    ) -> int:
+        _ = cex_price
+        pair_symbol = (symbol or "SOL").strip().upper()
+        size_usdc = self.calculate_trade_size(pair_symbol, float(gross_bps))
 
         if self.settings.trading.dynamic_amount:
             safe_cap = await self.get_safe_trade_size()
             if safe_cap > 0:
-                size = min(size, safe_cap)
+                size_usdc = min(size_usdc, safe_cap)
             else:
-                size = 0
-        return size
+                size_usdc = 0
+        return size_usdc
 
     async def _calculate_confidence(self, gross: int, net: int, size: int) -> float:
         """Brain + LightGBM ensemble (falls back to heuristic if ML unavailable)."""
@@ -1690,6 +1970,13 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if not raw:
         return default
     return raw in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 _cex_dex_strategy_singleton: CexDexStrategy | None = None

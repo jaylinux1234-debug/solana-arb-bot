@@ -102,8 +102,26 @@ class V2Config:
                 return _env_float(base, default)
             return default
 
-        gross_base = _v2_threshold("V2_MIN_GROSS_BPS", "V2_MIN_GROSS_BPS_BASE", 7.0)
-        net_base = _v2_threshold("V2_MIN_NET_BPS", "V2_MIN_NET_BPS_BASE", 1.2)
+        def _v2_net_threshold(default: float = 1.2) -> float:
+            if os.getenv("V2_MIN_NET_BPS") is not None:
+                return _env_float("V2_MIN_NET_BPS", default)
+            if os.getenv("CEX_DEX_MIN_NET_SPREAD_BPS") is not None:
+                return _env_float("CEX_DEX_MIN_NET_SPREAD_BPS", default)
+            if os.getenv("V2_MIN_NET_BPS_BASE") is not None:
+                return _env_float("V2_MIN_NET_BPS_BASE", default)
+            return default
+
+        def _v2_gross_threshold(default: float = 7.0) -> float:
+            if os.getenv("V2_MIN_GROSS_BPS") is not None:
+                return _env_float("V2_MIN_GROSS_BPS", default)
+            if os.getenv("CEX_DEX_MIN_GROSS_SPREAD_BPS") is not None:
+                return float(_env_int("CEX_DEX_MIN_GROSS_SPREAD_BPS", int(default)))
+            if os.getenv("V2_MIN_GROSS_BPS_BASE") is not None:
+                return _env_float("V2_MIN_GROSS_BPS_BASE", default)
+            return default
+
+        gross_base = _v2_gross_threshold(7.0)
+        net_base = _v2_net_threshold(1.2)
         max_usdc = _env_float("V2_MAX_FLASH_USDC", _env_float("MAX_FLASH_USDC", 12.0))
         max_micro = int(max_usdc * 1_000_000)
         probe = _env_int(

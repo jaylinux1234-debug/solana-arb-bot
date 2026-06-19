@@ -20,7 +20,11 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, generate_late
 
 from src.config.settings import Settings, get_settings
 from src.core.risk import RiskEngine
-from src.monitoring.cex_health import get_backpack_balance_status
+from src.monitoring.cex_health import (
+    get_backpack_balance_status,
+    get_cached_backpack_usdc,
+    record_backpack_balances,
+)
 from src.monitoring.metrics import expose_metrics
 from src.monitoring.metrics import metrics as metrics_collector
 
@@ -40,6 +44,27 @@ opportunity_counter = Counter("bot_opportunities_detected", "Opportunities detec
 
 def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _fetch_backpack_usdc_sync() -> float:
+    """Fetch Backpack USDC on a fresh event loop (health server thread-safe)."""
+    from src.core.wallet import get_usdc_balance as get_backpack_usdc
+
+    return asyncio.run(get_backpack_usdc())
+
+
+def _health_config_snapshot(cfg: Settings) -> dict[str, Any]:
+    v2_max_raw = (os.getenv("V2_MAX_FLASH_USDC") or "").strip()
+    max_flash = float(v2_max_raw) if v2_max_raw else float(cfg.trading.max_flash_usdc)
+    min_net = float(cfg.trading.cex_dex_min_net_spread_bps)
+    return {
+        "min_net_bps": min_net,
+        "ai_confidence": cfg.trading.ai_approve_min_confidence,
+        "max_flash_usdc": max_flash,
+        "v2_min_net_bps": min_net,
+        "v2_max_flash_usdc": max_flash if v2_max_raw else None,
+        "strategy_priority_order": getattr(cfg, "STRATEGY_PRIORITY_ORDER", None),
+    }
 
 
 def _snapshot_metrics() -> dict[str, Any]:
@@ -152,12 +177,16 @@ async def detailed_health() -> dict[str, Any]:
         except Exception as exc:
             logger.debug("Backpack balance refresh failed: %s", exc)
 
-    try:
-        from src.cex.backpack import get_backpack_client
-
-        backpack_usdc = round(await get_backpack_client().get_balance("USDC"), 2)
-    except Exception as exc:
-        logger.debug("Backpack USDC fetch failed: %s", exc)
+    backpack_usdc = get_cached_backpack_usdc(max_age_sec=180.0)
+    if backpack_usdc is None:
+        try:
+            backpack_usdc = round(await asyncio.to_thread(_fetch_backpack_usdc_sync), 2)
+            record_backpack_balances(backpack_usdc)
+        except Exception as exc:
+            logger.debug("Backpack USDC fetch failed: %s", exc)
+            backpack_usdc = None
+    else:
+        backpack_usdc = round(float(backpack_usdc), 2)
 
     last_collateral_fill: str | None = None
     try:
@@ -185,12 +214,7 @@ async def detailed_health() -> dict[str, Any]:
         "risk": risk_status,
         "metrics": _snapshot_metrics(),
         "backpack_balance": backpack_status,
-        "config": {
-            "min_net_bps": cfg.trading.cex_dex_min_net_spread_bps,
-            "ai_confidence": cfg.trading.ai_approve_min_confidence,
-            "max_flash_usdc": cfg.trading.max_flash_usdc,
-            "strategy_priority_order": getattr(cfg, "STRATEGY_PRIORITY_ORDER", None),
-        },
+        "config": _health_config_snapshot(cfg),
         "timestamp": _utcnow_iso(),
         "uptime_seconds": round(metrics_collector.get_uptime(), 2),
     }

@@ -8,15 +8,15 @@ Wants=network-online.target
 Requires=docker.service
 
 [Service]
-Type=simple
+Type=oneshot
+RemainAfterExit=yes
 User=root
 Group=docker
 WorkingDirectory=/path/to/solana-arb-bot
 ExecStartPre=/usr/bin/npm run sync:compose-env
-ExecStart=/path/to/solana-arb-bot/restart-monitor.sh
-Restart=always
-RestartSec=10
-TimeoutStartSec=0
+ExecStart=/path/to/solana-arb-bot/scripts/restart-monitor.sh
+Restart=no
+TimeoutStartSec=600
 StandardOutput=journal
 StandardError=journal
 

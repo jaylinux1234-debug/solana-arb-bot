@@ -667,6 +667,12 @@ class InventoryManager:
 
         onchain_sol = await self.get_wallet_sol(wallet_pubkey)
         onchain_usdc = await self.get_available_usdc()
+        try:
+            from src.monitoring.cex_health import record_backpack_balances
+
+            record_backpack_balances(backpack_usdc, backpack_sol)
+        except Exception:
+            pass
         return {
             "backpack_sol": backpack_sol,
             "backpack_usdc": backpack_usdc,

@@ -80,10 +80,17 @@ def _renew_loop() -> None:
             continue
         try:
             current = _redis_client.get(_redis_lock_key)
-            if current != _redis_lock_token:
+            if current == _redis_lock_token:
+                _redis_client.expire(_redis_lock_key, ttl)
+            elif current is None:
+                if _redis_client.set(_redis_lock_key, _redis_lock_token, nx=True, ex=ttl):
+                    logger.warning("Singleton Redis lock re-acquired after expiry")
+                else:
+                    logger.error("Singleton Redis lock lost (key expired, re-acquire failed)")
+                    break
+            else:
                 logger.error("Singleton Redis lock lost (token mismatch)")
                 break
-            _redis_client.expire(_redis_lock_key, ttl)
         except Exception as exc:
             logger.warning("Singleton lock renew failed: %s", exc)
 
@@ -107,7 +114,7 @@ def _acquire_redis_lock(*, log: logging.Logger) -> None:
     token = f"{os.getpid()}:{uuid.uuid4().hex}"
     ttl = _lock_ttl_sec()
 
-    reclaim_stale_lock(client, key, log=log)
+    reclaim_stale_lock(client, key, log=log, our_token=_redis_lock_token)
     if client.exists(key) and os.getenv("BOT_SINGLETON_TERMINATE_HOLDER", "").lower() in (
         "1",
         "true",
@@ -121,13 +128,13 @@ def _acquire_redis_lock(*, log: logging.Logger) -> None:
         if pid is not None and pid != os.getpid():
             terminate_pid(pid, log=log)
             time.sleep(max(1, int(os.getenv("BOT_SINGLETON_TERMINATE_WAIT_SEC", "3") or 3)))
-            reclaim_stale_lock(client, key, log=log)
+            reclaim_stale_lock(client, key, log=log, our_token=_redis_lock_token)
 
     wait_sec = _lock_wait_sec()
     retry_interval = max(2, min(10, ttl // 6))
     deadline = time.monotonic() + wait_sec
     while not client.set(key, token, nx=True, ex=ttl):
-        reclaim_stale_lock(client, key, log=log)
+        reclaim_stale_lock(client, key, log=log, our_token=_redis_lock_token)
         holder = client.get(key)
         if time.monotonic() >= deadline:
             raise SystemExit(
