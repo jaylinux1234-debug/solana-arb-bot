@@ -1195,18 +1195,38 @@ class CexDexStrategy:
                 best_fail_size = int(size_usdc)
                 chosen_rescue_size = int(size_usdc)
                 chosen_sim_net = float(net_bps)
+                rescue_timeout_sec = _env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_SIM_TIMEOUT_SEC", 3.5)
                 try:
                     for rescue_size in rescue_sizes:
-                        sim_ok, sim_net, sim_reason, _ = await pre_simulate_cex_buy_dex_sell(
-                            self.jupiter,
-                            int(rescue_size),
-                            float(cex_buy),
-                            base_mint=pair.base_mint,
-                            base_decimals=pair.base_decimals,
-                            expected_net_bps=float(net_bps),
-                            probe_usdc_micro=self._probe_usdc_micro(),
-                            min_net_bps=rescue_min_net,
-                        )
+                        try:
+                            sim_ok, sim_net, sim_reason, _ = await asyncio.wait_for(
+                                pre_simulate_cex_buy_dex_sell(
+                                    self.jupiter,
+                                    int(rescue_size),
+                                    float(cex_buy),
+                                    base_mint=pair.base_mint,
+                                    base_decimals=pair.base_decimals,
+                                    expected_net_bps=float(net_bps),
+                                    probe_usdc_micro=self._probe_usdc_micro(),
+                                    min_net_bps=rescue_min_net,
+                                ),
+                                timeout=max(0.5, float(rescue_timeout_sec)),
+                            )
+                        except TimeoutError:
+                            sim_ok = False
+                            sim_net = float("-inf")
+                            sim_reason = f"timeout_{rescue_timeout_sec:.1f}s"
+                        except Exception as exc:
+                            sim_ok = False
+                            sim_net = float("-inf")
+                            sim_reason = f"exception:{type(exc).__name__}"
+                            logger.warning(
+                                "MODEL_NET_SOFT_RESCUE_ATTEMPT_FAIL | pair=%s size_usdc=%.2f reason=%s error=%s",
+                                pair.pair_label,
+                                int(rescue_size) / 1_000_000.0,
+                                sim_reason,
+                                exc,
+                            )
                         if sim_ok:
                             chosen_rescue_size = int(rescue_size)
                             chosen_sim_net = float(sim_net)
@@ -2089,6 +2109,13 @@ def _env_bool(name: str, default: bool = False) -> bool:
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
 
