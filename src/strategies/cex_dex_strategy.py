@@ -84,6 +84,13 @@ def _load_proven_midcaps() -> frozenset[str]:
     return frozenset(PROVEN_MIDCAPS)
 
 
+def _soft_rescue_symbols() -> set[str]:
+    raw = (os.getenv("CEX_DEX_MODEL_NET_SOFT_RESCUE_SYMBOLS") or "SOL,WIF").strip()
+    if not raw:
+        return {"SOL", "WIF"}
+    return {s.strip().upper() for s in raw.split(",") if s.strip()}
+
+
 def evaluate_cex_dex_opportunity(
     cex_mid: float,
     jup_price: float,
@@ -1097,6 +1104,7 @@ class CexDexStrategy:
             )
             return None
 
+        rescued_by_roundtrip = False
         if not self._is_profitable_opportunity(edge_bps, net_bps, confidence, gates=gates):
             rescue_enabled = _env_bool("CEX_DEX_MODEL_NET_SOFT_RESCUE", True)
             min_gross_gate = float(gates.get("min_gross", self.settings.CEX_DEX_MIN_GROSS_SPREAD_BPS))
@@ -1106,9 +1114,10 @@ class CexDexStrategy:
                     str(max(min_gross_gate, 8.0)),
                 )
             )
+            rescue_symbols = _soft_rescue_symbols()
             if (
                 rescue_enabled
-                and pair.symbol == "SOL"
+                and pair.symbol.upper() in rescue_symbols
                 and edge_bps >= rescue_floor
                 and not self.settings.test_mode
                 and not self.settings.simulate
@@ -1132,6 +1141,7 @@ class CexDexStrategy:
                         sim_net,
                     )
                     net_bps = max(net_bps, float(sim_net))
+                    rescued_by_roundtrip = True
                 else:
                     logger.info(
                         "MODEL_NET_SOFT_RESCUE_SKIP | pair=%s edge=%.1f reason=%s",
@@ -1139,7 +1149,14 @@ class CexDexStrategy:
                         edge_bps,
                         sim_reason,
                     )
-            if not self._is_profitable_opportunity(edge_bps, net_bps, confidence, gates=gates):
+            rescue_bypass_net = _env_bool("CEX_DEX_MODEL_NET_SOFT_RESCUE_BYPASS_NET_GATE", True)
+            rescued_gate_ok = False
+            if rescued_by_roundtrip and rescue_bypass_net:
+                min_gross = float(gates.get("min_gross", self.settings.CEX_DEX_MIN_GROSS_SPREAD_BPS))
+                min_ai = float(gates.get("ai_conf", self.settings.AI_APPROVE_MIN_CONFIDENCE))
+                rescued_gate_ok = edge_bps >= min_gross and confidence >= min_ai
+
+            if not rescued_gate_ok and not self._is_profitable_opportunity(edge_bps, net_bps, confidence, gates=gates):
                 if self.settings.CEX_DEX_AGGRESSIVE_OPPORTUNITY_FILTER:
                     self.log_near_miss(
                         edge_bps,
