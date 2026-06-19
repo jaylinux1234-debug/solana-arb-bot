@@ -1193,6 +1193,8 @@ class CexDexStrategy:
                 sim_reason = "no_rescue_size"
                 best_fail_sim = float("-inf")
                 best_fail_size = int(size_usdc)
+                best_fail_sim_usdc_micro = int(size_usdc)
+                best_fail_depth_market = pair.backpack_symbol
                 chosen_rescue_size = int(size_usdc)
                 chosen_sim_net = float(net_bps)
                 chosen_sim_usdc_micro = int(size_usdc)
@@ -1201,6 +1203,7 @@ class CexDexStrategy:
                 try:
                     for rescue_size in rescue_sizes:
                         rescue_probe_micro = min(self._probe_usdc_micro(), int(rescue_size))
+                        sim_details: dict[str, Any] = {}
                         try:
                             sim_ok, sim_net, sim_reason, sim_details = await asyncio.wait_for(
                                 pre_simulate_cex_buy_dex_sell(
@@ -1245,6 +1248,12 @@ class CexDexStrategy:
                         if float(sim_net) > best_fail_sim:
                             best_fail_sim = float(sim_net)
                             best_fail_size = int(rescue_size)
+                            best_fail_sim_usdc_micro = int(
+                                sim_details.get("usdc_in_micro") or rescue_size
+                            )
+                            best_fail_depth_market = str(
+                                sim_details.get("cex_depth_market") or pair.backpack_symbol
+                            )
                 except Exception as exc:
                     sim_reason = f"exception:{type(exc).__name__}"
                     logger.warning(
@@ -1271,12 +1280,14 @@ class CexDexStrategy:
                     else:
                         fail_preview = "n/a" if best_fail_sim == float("-inf") else f"{best_fail_sim:.2f}"
                         logger.info(
-                            "MODEL_NET_SOFT_RESCUE_SKIP | pair=%s edge=%.1f reason=%s best_sim_net=%sbps best_size_usdc=%.2f",
+                            "MODEL_NET_SOFT_RESCUE_SKIP | pair=%s edge=%.1f reason=%s best_sim_net=%sbps best_size_usdc=%.2f sim_usdc=%.2f cex_depth_market=%s",
                             pair.pair_label,
                             edge_bps,
                             sim_reason,
                             fail_preview,
                             best_fail_size / 1_000_000.0,
+                            best_fail_sim_usdc_micro / 1_000_000.0,
+                            best_fail_depth_market,
                         )
             rescue_bypass_net = _env_bool("CEX_DEX_MODEL_NET_SOFT_RESCUE_BYPASS_NET_GATE", True)
             rescued_gate_ok = False
