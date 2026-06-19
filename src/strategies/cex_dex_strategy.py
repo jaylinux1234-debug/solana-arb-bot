@@ -1195,11 +1195,14 @@ class CexDexStrategy:
                 best_fail_size = int(size_usdc)
                 chosen_rescue_size = int(size_usdc)
                 chosen_sim_net = float(net_bps)
+                chosen_sim_usdc_micro = int(size_usdc)
+                chosen_depth_market = pair.backpack_symbol
                 rescue_timeout_sec = _env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_SIM_TIMEOUT_SEC", 3.5)
                 try:
                     for rescue_size in rescue_sizes:
+                        rescue_probe_micro = min(self._probe_usdc_micro(), int(rescue_size))
                         try:
-                            sim_ok, sim_net, sim_reason, _ = await asyncio.wait_for(
+                            sim_ok, sim_net, sim_reason, sim_details = await asyncio.wait_for(
                                 pre_simulate_cex_buy_dex_sell(
                                     self.jupiter,
                                     int(rescue_size),
@@ -1208,7 +1211,7 @@ class CexDexStrategy:
                                     base_mint=pair.base_mint,
                                     base_decimals=pair.base_decimals,
                                     expected_net_bps=float(net_bps),
-                                    probe_usdc_micro=self._probe_usdc_micro(),
+                                    probe_usdc_micro=rescue_probe_micro,
                                     min_net_bps=rescue_min_net,
                                 ),
                                 timeout=max(0.5, float(rescue_timeout_sec)),
@@ -1231,6 +1234,12 @@ class CexDexStrategy:
                         if sim_ok:
                             chosen_rescue_size = int(rescue_size)
                             chosen_sim_net = float(sim_net)
+                            chosen_sim_usdc_micro = int(
+                                sim_details.get("usdc_in_micro") or rescue_size
+                            )
+                            chosen_depth_market = str(
+                                sim_details.get("cex_depth_market") or pair.backpack_symbol
+                            )
                             rescued_by_roundtrip = True
                             break
                         if float(sim_net) > best_fail_sim:
@@ -1248,12 +1257,14 @@ class CexDexStrategy:
                 else:
                     if rescued_by_roundtrip:
                         logger.info(
-                            "MODEL_NET_SOFT_RESCUE | pair=%s edge=%.1f modeled_net=%.1f sim_net=%.1f rescue_size_usdc=%.2f",
+                            "MODEL_NET_SOFT_RESCUE | pair=%s edge=%.1f modeled_net=%.1f sim_net=%.1f rescue_size_usdc=%.2f sim_usdc=%.2f cex_depth_market=%s",
                             pair.pair_label,
                             edge_bps,
                             net_bps,
                             chosen_sim_net,
                             chosen_rescue_size / 1_000_000.0,
+                            chosen_sim_usdc_micro / 1_000_000.0,
+                            chosen_depth_market,
                         )
                         size_usdc = int(chosen_rescue_size)
                         net_bps = max(net_bps, chosen_sim_net)
