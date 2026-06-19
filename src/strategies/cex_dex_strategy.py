@@ -1133,6 +1133,15 @@ class CexDexStrategy:
 
         rescued_by_roundtrip = False
         if not self._is_profitable_opportunity(edge_bps, net_bps, confidence, gates=gates):
+            logger.info(
+                "MODEL_NET_SOFT_RESCUE_ELIGIBLE | pair=%s edge=%.1f net=%.1f conf=%.1f test_mode=%s simulate=%s",
+                pair.pair_label,
+                edge_bps,
+                net_bps,
+                confidence,
+                self.settings.test_mode,
+                self.settings.simulate,
+            )
             rescue_enabled = _env_bool("CEX_DEX_MODEL_NET_SOFT_RESCUE", True)
             min_gross_gate = float(gates.get("min_gross", self.settings.CEX_DEX_MIN_GROSS_SPREAD_BPS))
             rescue_floor = float(
