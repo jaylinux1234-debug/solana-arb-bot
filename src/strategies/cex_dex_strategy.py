@@ -1164,47 +1164,57 @@ class CexDexStrategy:
                 best_fail_size = int(size_usdc)
                 chosen_rescue_size = int(size_usdc)
                 chosen_sim_net = float(net_bps)
-                for rescue_size in rescue_sizes:
-                    sim_ok, sim_net, sim_reason, _ = await pre_simulate_cex_buy_dex_sell(
-                        self.jupiter,
-                        int(rescue_size),
-                        float(cex_buy),
-                        base_mint=pair.base_mint,
-                        base_decimals=pair.base_decimals,
-                        expected_net_bps=float(net_bps),
-                        probe_usdc_micro=self._probe_usdc_micro(),
-                        min_net_bps=rescue_min_net,
-                    )
-                    if sim_ok:
-                        chosen_rescue_size = int(rescue_size)
-                        chosen_sim_net = float(sim_net)
-                        rescued_by_roundtrip = True
-                        break
-                    if float(sim_net) > best_fail_sim:
-                        best_fail_sim = float(sim_net)
-                        best_fail_size = int(rescue_size)
-
-                if rescued_by_roundtrip:
-                    logger.info(
-                        "MODEL_NET_SOFT_RESCUE | pair=%s edge=%.1f modeled_net=%.1f sim_net=%.1f rescue_size_usdc=%.2f",
-                        pair.pair_label,
-                        edge_bps,
-                        net_bps,
-                        chosen_sim_net,
-                        chosen_rescue_size / 1_000_000.0,
-                    )
-                    size_usdc = int(chosen_rescue_size)
-                    net_bps = max(net_bps, chosen_sim_net)
-                else:
-                    fail_preview = "n/a" if best_fail_sim == float("-inf") else f"{best_fail_sim:.2f}"
-                    logger.info(
-                        "MODEL_NET_SOFT_RESCUE_SKIP | pair=%s edge=%.1f reason=%s best_sim_net=%sbps best_size_usdc=%.2f",
+                try:
+                    for rescue_size in rescue_sizes:
+                        sim_ok, sim_net, sim_reason, _ = await pre_simulate_cex_buy_dex_sell(
+                            self.jupiter,
+                            int(rescue_size),
+                            float(cex_buy),
+                            base_mint=pair.base_mint,
+                            base_decimals=pair.base_decimals,
+                            expected_net_bps=float(net_bps),
+                            probe_usdc_micro=self._probe_usdc_micro(),
+                            min_net_bps=rescue_min_net,
+                        )
+                        if sim_ok:
+                            chosen_rescue_size = int(rescue_size)
+                            chosen_sim_net = float(sim_net)
+                            rescued_by_roundtrip = True
+                            break
+                        if float(sim_net) > best_fail_sim:
+                            best_fail_sim = float(sim_net)
+                            best_fail_size = int(rescue_size)
+                except Exception as exc:
+                    sim_reason = f"exception:{type(exc).__name__}"
+                    logger.warning(
+                        "MODEL_NET_SOFT_RESCUE_SKIP | pair=%s edge=%.1f reason=%s error=%s",
                         pair.pair_label,
                         edge_bps,
                         sim_reason,
-                        fail_preview,
-                        best_fail_size / 1_000_000.0,
+                        exc,
                     )
+                else:
+                    if rescued_by_roundtrip:
+                        logger.info(
+                            "MODEL_NET_SOFT_RESCUE | pair=%s edge=%.1f modeled_net=%.1f sim_net=%.1f rescue_size_usdc=%.2f",
+                            pair.pair_label,
+                            edge_bps,
+                            net_bps,
+                            chosen_sim_net,
+                            chosen_rescue_size / 1_000_000.0,
+                        )
+                        size_usdc = int(chosen_rescue_size)
+                        net_bps = max(net_bps, chosen_sim_net)
+                    else:
+                        fail_preview = "n/a" if best_fail_sim == float("-inf") else f"{best_fail_sim:.2f}"
+                        logger.info(
+                            "MODEL_NET_SOFT_RESCUE_SKIP | pair=%s edge=%.1f reason=%s best_sim_net=%sbps best_size_usdc=%.2f",
+                            pair.pair_label,
+                            edge_bps,
+                            sim_reason,
+                            fail_preview,
+                            best_fail_size / 1_000_000.0,
+                        )
             rescue_bypass_net = _env_bool("CEX_DEX_MODEL_NET_SOFT_RESCUE_BYPASS_NET_GATE", True)
             rescued_gate_ok = False
             if rescued_by_roundtrip and rescue_bypass_net:
