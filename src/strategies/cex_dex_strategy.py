@@ -1183,10 +1183,15 @@ class CexDexStrategy:
                 rescue_min_net = _soft_rescue_min_sim_net_bps()
                 rescue_sizes: list[int] = []
                 max_trade = self._max_trade_usdc_micro(pair.symbol)
-                start_size = max(min_trade_micro, min(max_trade, int(size_usdc)))
+                rescue_min_trade_micro = _env_int(
+                    "CEX_DEX_MODEL_NET_SOFT_RESCUE_MIN_TRADE_USDC_MICRO",
+                    int(min_trade_micro),
+                )
+                rescue_min_trade_micro = max(1, min(max_trade, rescue_min_trade_micro))
+                start_size = max(rescue_min_trade_micro, min(max_trade, int(size_usdc)))
                 for mult in _soft_rescue_size_ladder():
                     candidate = int(start_size * mult)
-                    clamped = max(min_trade_micro, min(max_trade, candidate))
+                    clamped = max(rescue_min_trade_micro, min(max_trade, candidate))
                     if clamped not in rescue_sizes:
                         rescue_sizes.append(clamped)
 
