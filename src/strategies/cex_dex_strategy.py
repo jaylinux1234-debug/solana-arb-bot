@@ -91,6 +91,11 @@ def _soft_rescue_symbols() -> set[str]:
     return {s.strip().upper() for s in raw.split(",") if s.strip()}
 
 
+def _soft_rescue_min_sim_net_bps() -> float:
+    # Keep rescue conservative by default (>= 0.5 bps simulated net) unless explicitly relaxed.
+    return _env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_MIN_SIM_NET_BPS", 0.5)
+
+
 def evaluate_cex_dex_opportunity(
     cex_mid: float,
     jup_price: float,
@@ -1130,7 +1135,7 @@ class CexDexStrategy:
                     base_decimals=pair.base_decimals,
                     expected_net_bps=float(net_bps),
                     probe_usdc_micro=self._probe_usdc_micro(),
-                    min_net_bps=roundtrip_sim_min_net_bps(),
+                    min_net_bps=_soft_rescue_min_sim_net_bps(),
                 )
                 if sim_ok:
                     logger.info(
