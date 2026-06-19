@@ -129,6 +129,8 @@ def _roundtrip_include_jito_tip() -> bool:
 async def _cex_buy_price_from_depth(
     usdc_notional: float,
     cex_price: float,
+    *,
+    backpack_symbol: str = "SOL_USDC",
 ) -> tuple[float, dict[str, Any], str | None]:
     """Backpack ask walk for effective buy price; optional depth gate."""
     meta: dict[str, Any] = {}
@@ -140,12 +142,14 @@ async def _cex_buy_price_from_depth(
         from src.cex.backpack_ticker import cex_buy_walk_ask_impact_bps
 
         levels = int(os.getenv("CEX_DEX_ROUNDTRIP_DEPTH_LEVELS", "5"))
-        book = await get_backpack_client().get_orderbook("SOL_USDC", limit=levels)
+        market = (backpack_symbol or "SOL_USDC").strip().upper()
+        book = await get_backpack_client().get_orderbook(market, limit=levels)
         impact_bps, eff_price, sufficient = cex_buy_walk_ask_impact_bps(
             book,
             usdc_notional,
             max_levels=levels,
         )
+        meta["cex_depth_market"] = market
         meta["cex_depth_impact_bps"] = round(impact_bps, 2)
         meta["cex_effective_ask"] = round(eff_price, 6)
         if not sufficient:
@@ -194,6 +198,7 @@ async def pre_simulate_cex_buy_dex_sell(
     usdc_micro: int,
     cex_price: float,
     *,
+    backpack_symbol: str = "SOL_USDC",
     base_mint: str = SOL_MINT,
     base_decimals: int = 9,
     slippage_bps: int | None = None,
@@ -219,7 +224,11 @@ async def pre_simulate_cex_buy_dex_sell(
         base_mint, USDC_MINT
     )
     usdc = sim_micro / 1_000_000.0
-    eff_cex_price, depth_meta, depth_err = await _cex_buy_price_from_depth(usdc, cex_price)
+    eff_cex_price, depth_meta, depth_err = await _cex_buy_price_from_depth(
+        usdc,
+        cex_price,
+        backpack_symbol=backpack_symbol,
+    )
     if depth_err:
         details = {"cex_price": cex_price, **depth_meta}
         return False, 0.0, depth_err, details

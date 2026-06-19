@@ -180,6 +180,7 @@ class RoundtripSimulator:
             self.jupiter,
             size_usdc_micro,
             cex_buy_price,
+            backpack_symbol=str(opportunity.get("backpack_symbol") or "SOL_USDC"),
             base_mint=base_mint,
             base_decimals=base_decimals,
             expected_net_bps=expected_net_bps,

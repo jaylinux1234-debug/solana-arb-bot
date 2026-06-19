@@ -106,6 +106,7 @@ async def _production_roundtrip_sim(opportunity: dict[str, Any]) -> dict[str, An
             jupiter,
             size_micro,
             cex_price,
+            backpack_symbol=str(opportunity.get("backpack_symbol") or "SOL_USDC"),
             expected_net_bps=opportunity.get("net_bps"),
         )
         return {
