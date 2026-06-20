@@ -170,6 +170,28 @@ def route_scores(
     fill_weight = _env_float("ADAPTIVE_ROUTER_FILL_WEIGHT", 15.0)
     vol_weight = _env_float("ADAPTIVE_ROUTER_VOL_WEIGHT", 8.0)
     skew_weight = _env_float("ADAPTIVE_ROUTER_SKEW_WEIGHT", 12.0)
+    opportunity_weight = _env_float("ADAPTIVE_ROUTER_OPPORTUNITY_COST_WEIGHT", 10.0)
+    opportunity_net_weight = _env_float("ADAPTIVE_ROUTER_OPPORTUNITY_NET_WEIGHT", 1.0)
+
+    def _snapshot_lane_ev(lane: str) -> float:
+        if not isinstance(snapshot, dict):
+            return 0.0
+        ctx = snapshot.get(lane)
+        if not isinstance(ctx, dict):
+            return 0.0
+        try:
+            gross = float(ctx.get("gross_bps") or ctx.get("spread_bps") or 0.0)
+        except (TypeError, ValueError):
+            gross = 0.0
+        try:
+            net = float(ctx.get("net_bps") or 0.0)
+        except (TypeError, ValueError):
+            net = 0.0
+        return max(0.0, gross + (opportunity_net_weight * net))
+
+    cex_ev = _snapshot_lane_ev("cex_dex")
+    rev_ev = _snapshot_lane_ev("dex_cex_reverse")
+    ev_delta = cex_ev - rev_ev
 
     out: dict[str, float] = {}
     for lane in LANES:
@@ -184,6 +206,12 @@ def route_scores(
             score += skew_weight * inv_skew
         if lane == "cex_dex" and inv_skew < -0.15:
             score += skew_weight * abs(inv_skew)
+
+        if opportunity_weight > 0 and lane in ("cex_dex", "dex_cex_reverse"):
+            if lane == "cex_dex":
+                score += opportunity_weight * max(-2.0, min(2.0, ev_delta / 25.0))
+            else:
+                score += opportunity_weight * max(-2.0, min(2.0, -ev_delta / 25.0))
 
         if snapshot and lane == "dex_cex_reverse":
             from src.strategies.brain_signals import dex_cex_reverse_signal_present

@@ -126,6 +126,17 @@ try:
         ["pair"],
         buckets=[0, 1, 2, 3, 5, 8, 12, 20, 30, 50, 80],
     )
+    cex_dex_rescue_negative_total = Counter(
+        "cex_dex_rescue_negative_total",
+        "Negative-sim rescue outcomes",
+        ["pair", "outcome", "blocked_by"],
+    )
+    cex_dex_rescue_negative_sim_bps = Histogram(
+        "cex_dex_rescue_negative_sim_bps",
+        "Sim-net distribution for negative-sim rescue decisions",
+        ["pair", "outcome"],
+        buckets=[-20, -15, -12, -10, -8, -6, -5, -4, -3, -2, -1, 0],
+    )
     rpc_request_latency_seconds = Histogram(
         "rpc_request_latency_seconds",
         "RPC HTTP request latency",
@@ -174,6 +185,8 @@ except ImportError:
     execution_slippage_bps = None  # type: ignore[assignment,misc]
     cex_dex_probe_exec_decay_bps = None  # type: ignore[assignment,misc]
     cex_dex_probe_exec_decay_hist = None  # type: ignore[assignment,misc]
+    cex_dex_rescue_negative_total = None  # type: ignore[assignment,misc]
+    cex_dex_rescue_negative_sim_bps = None  # type: ignore[assignment,misc]
     rpc_request_latency_seconds = None  # type: ignore[assignment,misc]
     inventory_reconcile_ok = None  # type: ignore[assignment,misc]
     circuit_breaker_tripped = None  # type: ignore[assignment,misc]
@@ -425,6 +438,39 @@ def record_probe_exec_decay(
         cex_dex_probe_exec_decay_bps.labels(pair=label).set(decay)
     if cex_dex_probe_exec_decay_hist is not None:
         cex_dex_probe_exec_decay_hist.labels(pair=label).observe(decay)
+
+
+def record_rescue_negative_event(
+    *,
+    pair: str,
+    outcome: str,
+    sim_net_bps: float,
+    edge_bps: float,
+    size_usdc: float,
+    blocked_by: str = "",
+) -> None:
+    pair_label = (pair or "UNKNOWN").strip().upper() or "UNKNOWN"
+    out = (outcome or "unknown").strip().lower() or "unknown"
+    blocked = (blocked_by or "none").strip().lower() or "none"
+    if cex_dex_rescue_negative_total is not None:
+        cex_dex_rescue_negative_total.labels(
+            pair=pair_label,
+            outcome=out,
+            blocked_by=blocked,
+        ).inc()
+    if cex_dex_rescue_negative_sim_bps is not None:
+        cex_dex_rescue_negative_sim_bps.labels(pair=pair_label, outcome=out).observe(
+            float(sim_net_bps)
+        )
+    logger.info(
+        "RESCUE_NEGATIVE_METRIC | pair=%s outcome=%s blocked_by=%s sim_net=%.2f edge=%.1f size_usdc=%.2f",
+        pair_label,
+        out,
+        blocked,
+        float(sim_net_bps),
+        float(edge_bps),
+        float(size_usdc),
+    )
 
 
 def record_attempt(strategy: str) -> None:

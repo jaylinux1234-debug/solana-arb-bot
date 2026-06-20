@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import time
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import mean
@@ -31,10 +32,15 @@ TRADE_LOG = Path(os.getenv("TRADE_HISTORY_PATH", "logs/trade_history.jsonl"))
 V2_PNL_LOG = Path(os.getenv("V2_PNL_LOG", "logs/v2_pnl.jsonl"))
 OUT_PATH = Path(os.getenv("AUTO_TUNE_OUTPUT", "logs/auto_tune_suggestions.json"))
 ENV_PATH = Path(os.getenv("AUTO_TUNE_ENV_FILE", ".env"))
+RESCUE_LOG = Path(os.getenv("AUTO_TUNE_RESCUE_LOG", "logs/v2.log"))
+RESCUE_POLICY_PATH = Path(
+    os.getenv("AUTO_TUNE_RESCUE_POLICY_OUTPUT", "logs/rescue_pair_policy.json")
+)
 
 HOT_GROSS_BPS = float(os.getenv("AUTO_TUNE_HOT_GROSS_BPS", "15"))
 WARM_GROSS_BPS = float(os.getenv("AUTO_TUNE_WARM_GROSS_BPS", "8"))
 WINDOW_ROWS = int(os.getenv("AUTO_TUNE_WINDOW_ROWS", "500"))
+RESCUE_WINDOW_LINES = int(os.getenv("AUTO_TUNE_RESCUE_WINDOW_LINES", "5000"))
 
 SAFE_KEYS = frozenset(
     {
@@ -64,6 +70,150 @@ FILL_MODE_OVERRIDES: dict[str, str] = {
     "V2_MIN_NET_BPS": "1.0",
     "V2_MIN_NET_BPS_BASE": "1.0",
 }
+
+
+def _percentile(values: list[float], q: float) -> float:
+    if not values:
+        return 0.0
+    q = max(0.0, min(1.0, q))
+    arr = sorted(float(v) for v in values)
+    idx = int((len(arr) - 1) * q)
+    return arr[idx]
+
+
+def _tail_lines(path: Path, limit: int) -> list[str]:
+    if not path.is_file() or limit <= 0:
+        return []
+    dq: deque[str] = deque(maxlen=limit)
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            dq.append(line.rstrip("\n"))
+    return list(dq)
+
+
+def analyze_rescue_policy(*, line_window: int = RESCUE_WINDOW_LINES) -> dict[str, Any]:
+    """Build pair-level negative-sim policy from rescue pass/block telemetry."""
+    lines = _tail_lines(RESCUE_LOG, line_window)
+    if not lines:
+        return {"status": "no_rescue_logs", "pairs": {}, "suggestions": []}
+
+    pair_stats: dict[str, dict[str, Any]] = {}
+    kv_re = re.compile(r"(\w+)=([^\s]+)")
+
+    def _pair_state(name: str) -> dict[str, Any]:
+        sym = (name.split("/")[0] if "/" in name else name).strip().upper()
+        if sym not in pair_stats:
+            pair_stats[sym] = {
+                "sim_nets": [],
+                "edges": [],
+                "confs": [],
+                "sizes": [],
+                "pass": 0,
+                "blocked": 0,
+                "blocked_by": {},
+            }
+        return pair_stats[sym]
+
+    for line in lines:
+        if (
+            "MODEL_NET_SOFT_RESCUE_NEGATIVE_SIM_PASS" not in line
+            and "MODEL_NET_SOFT_RESCUE_NEGATIVE_SIM_BLOCKED" not in line
+            and "MODEL_NET_SOFT_RESCUE_SKIP" not in line
+        ):
+            continue
+        row = {m.group(1): m.group(2) for m in kv_re.finditer(line)}
+        pair = str(row.get("pair") or "").strip()
+        if not pair:
+            continue
+        st = _pair_state(pair)
+
+        sim_raw = row.get("sim_net") or row.get("best_sim_net")
+        if sim_raw and sim_raw not in ("n/a", "inf", "-inf"):
+            try:
+                sim = float(str(sim_raw).replace("bps", ""))
+                st["sim_nets"].append(sim)
+            except (TypeError, ValueError):
+                pass
+        edge_raw = row.get("edge")
+        if edge_raw:
+            try:
+                st["edges"].append(float(edge_raw))
+            except (TypeError, ValueError):
+                pass
+        conf_raw = row.get("conf")
+        if conf_raw:
+            try:
+                st["confs"].append(float(conf_raw))
+            except (TypeError, ValueError):
+                pass
+        size_raw = row.get("size_usdc") or row.get("best_size_usdc")
+        if size_raw:
+            try:
+                st["sizes"].append(float(size_raw))
+            except (TypeError, ValueError):
+                pass
+
+        if "NEGATIVE_SIM_PASS" in line:
+            st["pass"] += 1
+        if "NEGATIVE_SIM_BLOCKED" in line:
+            st["blocked"] += 1
+            blocked_by = str(row.get("blocked_by") or "unknown")
+            for reason in blocked_by.split(","):
+                key = reason.strip().lower() or "unknown"
+                st["blocked_by"][key] = int(st["blocked_by"].get(key, 0)) + 1
+
+    pairs_policy: dict[str, Any] = {}
+    suggestions: list[dict[str, Any]] = []
+    for sym, st in pair_stats.items():
+        if len(st["sim_nets"]) < 4:
+            continue
+        sims = [float(v) for v in st["sim_nets"] if float(v) < 0]
+        if not sims:
+            continue
+        abs_losses = [abs(v) for v in sims]
+        max_loss = max(3.0, min(12.0, _percentile(abs_losses, 0.8) + 0.5))
+        min_edge = max(20.0, min(70.0, _percentile(st["edges"] or [35.0], 0.35) - 0.5))
+        min_conf = max(55.0, min(95.0, _percentile(st["confs"] or [75.0], 0.35) - 0.5))
+        max_size = max(3.0, min(20.0, _percentile(st["sizes"] or [8.0], 0.7)))
+        pairs_policy[sym] = {
+            "enabled": True,
+            "max_loss_bps": round(max_loss, 2),
+            "min_edge_bps": round(min_edge, 2),
+            "min_ai_conf": round(min_conf, 2),
+            "max_size_usdc": round(max_size, 2),
+            "sim_timeout_retries": 1 if st["blocked_by"].get("edge", 0) else 0,
+            "sample_count": len(st["sim_nets"]),
+            "blocked_by": st["blocked_by"],
+            "pass_count": int(st["pass"]),
+        }
+        suggestions.append(
+            {
+                "pair": sym,
+                "reason": "pair_rescue_policy_refresh",
+                "max_loss_bps": round(max_loss, 2),
+                "min_edge_bps": round(min_edge, 2),
+                "min_ai_conf": round(min_conf, 2),
+                "max_size_usdc": round(max_size, 2),
+            }
+        )
+
+    if not pairs_policy:
+        return {"status": "insufficient_samples", "pairs": {}, "suggestions": []}
+
+    out = {
+        "generated_utc": datetime.now(UTC).isoformat(),
+        "source_log": str(RESCUE_LOG),
+        "pairs": pairs_policy,
+    }
+    RESCUE_POLICY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RESCUE_POLICY_PATH.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    return {
+        "status": "ok",
+        "pair_count": len(pairs_policy),
+        "output_path": str(RESCUE_POLICY_PATH),
+        "pairs": pairs_policy,
+        "suggestions": suggestions,
+    }
 
 
 def _env_float(name: str, default: float) -> float:
@@ -329,16 +479,20 @@ def analyze(
     """Full report: v2 gate regime + fill drift."""
     gate_report = auto_tune_gates(log_file, window=window)
     fill_report = analyze_fill_drift()
+    rescue_policy_report = analyze_rescue_policy()
 
     all_suggestions = list(gate_report.get("suggestions") or [])
     for sug in fill_report.get("suggestions") or []:
         if not any(s.get("key") == sug.get("key") for s in all_suggestions):
             all_suggestions.append(sug)
+    for sug in rescue_policy_report.get("suggestions") or []:
+        all_suggestions.append(sug)
 
     return {
         "generated_utc": datetime.now(UTC).isoformat(),
         "gate_analysis": gate_report,
         "fill_analysis": fill_report,
+        "rescue_policy_analysis": rescue_policy_report,
         "suggestions": all_suggestions,
         "message": gate_report.get("message", ""),
     }
@@ -407,10 +561,13 @@ def _print_summary(report: dict[str, Any]) -> None:
     if suggestions:
         print(f"{len(suggestions)} suggestion(s):")
         for sug in suggestions:
-            print(
-                f"  {sug.get('key')}: {sug.get('current')} → {sug.get('suggested')} "
-                f"({sug.get('reason')})"
-            )
+            if sug.get("key"):
+                print(
+                    f"  {sug.get('key')}: {sug.get('current')} → {sug.get('suggested')} "
+                    f"({sug.get('reason')})"
+                )
+            else:
+                print(f"  {sug}")
     else:
         print("No gate changes suggested.")
 

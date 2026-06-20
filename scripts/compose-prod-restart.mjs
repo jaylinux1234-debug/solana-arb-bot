@@ -6,6 +6,7 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import fs from "node:fs";
 import { COMPOSE_MONITORING } from "./compose-secret-files.mjs";
 import { rootDir } from "./compose-files.mjs";
 
@@ -21,6 +22,20 @@ function run(cmd, args) {
   if ((r.status ?? 1) !== 0) process.exit(r.status ?? 1);
 }
 
+function healLogsOwnership() {
+  const logsDir = path.join(rootDir, "logs");
+  if (!fs.existsSync(logsDir)) return;
+  // Production monitor runs as uid:gid 1000:1000; align logs to prevent v2.log PermissionError.
+  const r = spawnSync("chown", ["-R", "1000:1000", logsDir], {
+    cwd: rootDir,
+    stdio: "inherit",
+    shell: false,
+  });
+  if ((r.status ?? 0) !== 0) {
+    console.warn("warn: unable to chown logs to 1000:1000; continuing restart");
+  }
+}
+
 console.log(`=== safe restart: ${service} ===\n`);
 if (!process.argv.includes("--with-gate")) {
   console.log("  (skipping health gate — monitor will be recreated)\n");
@@ -28,6 +43,7 @@ if (!process.argv.includes("--with-gate")) {
   run("node", ["scripts/compose-health-gate.mjs"]);
 }
 run("node", ["scripts/sync-compose-env.mjs"]);
+healLogsOwnership();
 
 /** Stale lock blocks startup until TTL (~120s); health /wait fails during wait. */
 function clearSingletonLock() {

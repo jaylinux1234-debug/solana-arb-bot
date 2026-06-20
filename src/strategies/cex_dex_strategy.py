@@ -37,6 +37,7 @@ from src.monitoring.metrics import (
     record_cex_dex_near_miss,
     record_execution_slippage,
     record_probe_exec_decay,
+    record_rescue_negative_event,
     record_trade_execution,
     record_trade_opportunity,
     record_trade_signal,
@@ -75,6 +76,79 @@ logger = logging.getLogger(__name__)
 
 # High-liquidity midcaps only (override via ``CEX_PROVEN_MIDCAPS``; empty = SOL-only).
 PROVEN_MIDCAPS: tuple[str, ...] = ()
+_RESCUE_PAIR_POLICY_CACHE: dict[str, Any] = {}
+_RESCUE_PAIR_POLICY_MTIME = 0.0
+_RESCUE_PAIR_POLICY_LOADED_AT = 0.0
+_RESCUE_CALIBRATION_CACHE: dict[str, Any] = {}
+_RESCUE_CALIBRATION_MTIME = 0.0
+_RESCUE_CALIBRATION_LOADED_AT = 0.0
+
+
+def _read_json_file(path: Path) -> dict[str, Any]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _rescue_pair_policy_path() -> Path:
+    raw = (os.getenv("CEX_DEX_MODEL_NET_SOFT_RESCUE_PAIR_POLICY_PATH") or "").strip()
+    return Path(raw or "logs/rescue_pair_policy.json")
+
+
+def _load_rescue_pair_policy() -> dict[str, Any]:
+    global _RESCUE_PAIR_POLICY_CACHE
+    global _RESCUE_PAIR_POLICY_MTIME
+    global _RESCUE_PAIR_POLICY_LOADED_AT
+    path = _rescue_pair_policy_path()
+    now = time.time()
+    ttl = max(5.0, _env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_POLICY_CACHE_SEC", 60.0))
+    if now - _RESCUE_PAIR_POLICY_LOADED_AT < ttl:
+        return _RESCUE_PAIR_POLICY_CACHE
+    _RESCUE_PAIR_POLICY_LOADED_AT = now
+    if not path.is_file():
+        _RESCUE_PAIR_POLICY_CACHE = {}
+        _RESCUE_PAIR_POLICY_MTIME = 0.0
+        return _RESCUE_PAIR_POLICY_CACHE
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return _RESCUE_PAIR_POLICY_CACHE
+    if mtime != _RESCUE_PAIR_POLICY_MTIME:
+        _RESCUE_PAIR_POLICY_CACHE = _read_json_file(path)
+        _RESCUE_PAIR_POLICY_MTIME = mtime
+    return _RESCUE_PAIR_POLICY_CACHE
+
+
+def _rescue_calibration_path() -> Path:
+    raw = (os.getenv("CEX_DEX_MODEL_NET_SOFT_RESCUE_CALIBRATION_PATH") or "").strip()
+    return Path(raw or "logs/rescue_confidence_calibration.json")
+
+
+def _load_rescue_calibration() -> dict[str, Any]:
+    global _RESCUE_CALIBRATION_CACHE
+    global _RESCUE_CALIBRATION_MTIME
+    global _RESCUE_CALIBRATION_LOADED_AT
+    path = _rescue_calibration_path()
+    now = time.time()
+    ttl = max(5.0, _env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_CALIBRATION_CACHE_SEC", 120.0))
+    if now - _RESCUE_CALIBRATION_LOADED_AT < ttl:
+        return _RESCUE_CALIBRATION_CACHE
+    _RESCUE_CALIBRATION_LOADED_AT = now
+    if not path.is_file():
+        _RESCUE_CALIBRATION_CACHE = {}
+        _RESCUE_CALIBRATION_MTIME = 0.0
+        return _RESCUE_CALIBRATION_CACHE
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return _RESCUE_CALIBRATION_CACHE
+    if mtime != _RESCUE_CALIBRATION_MTIME:
+        _RESCUE_CALIBRATION_CACHE = _read_json_file(path)
+        _RESCUE_CALIBRATION_MTIME = mtime
+    return _RESCUE_CALIBRATION_CACHE
 
 
 def _load_proven_midcaps() -> frozenset[str]:
@@ -94,6 +168,60 @@ def _soft_rescue_symbols() -> set[str]:
 def _soft_rescue_min_sim_net_bps() -> float:
     # Keep rescue conservative by default (>= 0.5 bps simulated net) unless explicitly relaxed.
     return _env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_MIN_SIM_NET_BPS", 0.5)
+
+
+def _soft_rescue_negative_sim_guardrails(symbol: str | None = None) -> dict[str, float | bool]:
+    """Optional near-breakeven mode: allow small negative sim net under strict constraints."""
+    min_edge = _env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_NEGATIVE_SIM_MIN_EDGE_BPS", 35.0)
+    min_conf = _env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_NEGATIVE_SIM_MIN_AI_CONF", 78.0)
+    max_size = _env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_NEGATIVE_SIM_MAX_SIZE_USDC", 12.0)
+    max_loss = abs(_env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_NEGATIVE_SIM_MAX_LOSS_BPS", 5.0))
+    out: dict[str, float | bool] = {
+        "enabled": _env_bool("CEX_DEX_MODEL_NET_SOFT_RESCUE_ALLOW_NEGATIVE_SIM", False),
+        "min_edge_bps": max(0.0, min_edge),
+        "min_ai_conf": max(0.0, min_conf),
+        "max_size_usdc": max(0.5, max_size),
+        "max_loss_bps": max(0.0, max_loss),
+    }
+    base = (symbol or "").strip().upper()
+    if not base:
+        return out
+    pairs = (_load_rescue_pair_policy().get("pairs") or {})
+    pair_cfg = pairs.get(base)
+    if not isinstance(pair_cfg, dict):
+        return out
+    if pair_cfg.get("enabled") is not None:
+        out["enabled"] = bool(pair_cfg.get("enabled"))
+    for key in ("min_edge_bps", "min_ai_conf", "max_size_usdc", "max_loss_bps"):
+        if key not in pair_cfg:
+            continue
+        try:
+            out[key] = float(pair_cfg[key])
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _rescue_recalibrated_confidence(confidence: float, symbol: str, sim_net_bps: float) -> float:
+    if not _env_bool("CEX_DEX_MODEL_NET_SOFT_RESCUE_RECALIBRATE_CONFIDENCE", True):
+        return confidence
+    cfg = _load_rescue_calibration()
+    pairs = cfg.get("pairs") if isinstance(cfg.get("pairs"), dict) else {}
+    pair_cfg = pairs.get((symbol or "").strip().upper()) if isinstance(pairs, dict) else None
+    default_cfg = cfg.get("default") if isinstance(cfg.get("default"), dict) else {}
+    use_cfg = pair_cfg if isinstance(pair_cfg, dict) else default_cfg
+    if not isinstance(use_cfg, dict):
+        return confidence
+    try:
+        bias = float(use_cfg.get("bias", 0.0))
+    except (TypeError, ValueError):
+        bias = 0.0
+    try:
+        sim_slope = float(use_cfg.get("sim_net_slope", 0.0))
+    except (TypeError, ValueError):
+        sim_slope = 0.0
+    adjusted = float(confidence) + bias + (sim_slope * float(sim_net_bps))
+    return max(0.0, min(100.0, adjusted))
 
 
 def _soft_rescue_size_ladder() -> list[float]:
@@ -296,6 +424,140 @@ class CexDexStrategy:
         mult = float(os.getenv("CEX_MIN_BOOK_DEPTH_MULT", "1.5"))
         required_usdc = (self._probe_usdc_micro() / 1_000_000.0) * mult
         return cumulative_ask_usdc(depth, max_levels=20) < required_usdc
+
+    async def _rescue_depth_size_hints(
+        self,
+        pair: CexDexPair,
+        *,
+        start_size_micro: int,
+        rescue_min_trade_micro: int,
+        max_trade_micro: int,
+    ) -> list[int]:
+        """Depth-derived candidates to avoid static ladder blind spots."""
+        if not _env_bool("CEX_DEX_MODEL_NET_SOFT_RESCUE_USE_DEPTH_HINTS", True):
+            return []
+        depth_levels = max(3, _env_int("CEX_DEX_MODEL_NET_SOFT_RESCUE_DEPTH_LEVELS", 12))
+        depth = await self.backpack.get_depth(pair.backpack_symbol, limit=depth_levels)
+        asks = depth.get("asks") if isinstance(depth, dict) else None
+        if not isinstance(asks, list) or not asks:
+            return []
+        cum_usdc = 0.0
+        levels_usdc: list[float] = []
+        for ask in asks:
+            if not isinstance(ask, (list, tuple)) or len(ask) < 2:
+                continue
+            try:
+                px = float(ask[0])
+                qty = float(ask[1])
+            except (TypeError, ValueError):
+                continue
+            if px <= 0 or qty <= 0:
+                continue
+            cum_usdc += px * qty
+            levels_usdc.append(cum_usdc)
+        if not levels_usdc:
+            return []
+        fr_raw = (
+            os.getenv("CEX_DEX_MODEL_NET_SOFT_RESCUE_DEPTH_FRACTIONS")
+            or "0.25,0.4,0.6,0.8,1.0"
+        )
+        fractions: list[float] = []
+        for token in fr_raw.split(","):
+            tok = token.strip()
+            if not tok:
+                continue
+            try:
+                value = float(tok)
+            except ValueError:
+                continue
+            if 0 < value <= 1.0:
+                fractions.append(value)
+        if not fractions:
+            fractions = [0.25, 0.4, 0.6, 0.8, 1.0]
+        max_depth_usdc = min(levels_usdc[-1], start_size_micro / 1_000_000.0)
+        candidates: list[int] = []
+        for frac in fractions:
+            usdc = max_depth_usdc * frac
+            micro = int(usdc * 1_000_000.0)
+            clamped = max(rescue_min_trade_micro, min(max_trade_micro, micro))
+            if clamped not in candidates:
+                candidates.append(clamped)
+        return candidates
+
+    def _negative_tier_state_path(self) -> Path:
+        raw = (os.getenv("CEX_DEX_MODEL_NET_SOFT_RESCUE_NEGATIVE_SIM_STATE_PATH") or "").strip()
+        return Path(raw or "logs/rescue_negative_tier_state.json")
+
+    def _negative_tier_budget_allows(self) -> tuple[bool, str]:
+        if not _env_bool("CEX_DEX_MODEL_NET_SOFT_RESCUE_ALLOW_NEGATIVE_SIM", False):
+            return False, "disabled"
+        daily_budget = max(1, _env_int("CEX_DEX_MODEL_NET_SOFT_RESCUE_NEGATIVE_SIM_DAILY_BUDGET", 6))
+        max_consec_losses = max(
+            1,
+            _env_int("CEX_DEX_MODEL_NET_SOFT_RESCUE_NEGATIVE_SIM_MAX_CONSEC_LOSSES", 2),
+        )
+        path = self._negative_tier_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        today = datetime.now(UTC).date().isoformat()
+        state = {
+            "day": today,
+            "attempts": 0,
+            "consecutive_losses": 0,
+        }
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    state.update(data)
+            except Exception:
+                pass
+        if str(state.get("day")) != today:
+            state = {"day": today, "attempts": 0, "consecutive_losses": 0}
+            path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        attempts = int(state.get("attempts") or 0)
+        consec = int(state.get("consecutive_losses") or 0)
+        if attempts >= daily_budget:
+            return False, "daily_budget"
+        if consec >= max_consec_losses:
+            return False, "consecutive_losses"
+        return True, "ok"
+
+    def _negative_tier_record_attempt(self) -> None:
+        path = self._negative_tier_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        today = datetime.now(UTC).date().isoformat()
+        state = {"day": today, "attempts": 0, "consecutive_losses": 0}
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    state.update(data)
+            except Exception:
+                pass
+        if str(state.get("day")) != today:
+            state = {"day": today, "attempts": 0, "consecutive_losses": 0}
+        state["attempts"] = int(state.get("attempts") or 0) + 1
+        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    def _negative_tier_record_outcome(self, success: bool) -> None:
+        path = self._negative_tier_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        today = datetime.now(UTC).date().isoformat()
+        state = {"day": today, "attempts": 0, "consecutive_losses": 0}
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    state.update(data)
+            except Exception:
+                pass
+        if str(state.get("day")) != today:
+            state = {"day": today, "attempts": 0, "consecutive_losses": 0}
+        if success:
+            state["consecutive_losses"] = 0
+        else:
+            state["consecutive_losses"] = int(state.get("consecutive_losses") or 0) + 1
+        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
     async def should_trade_pair(self, pair: CexDexPair | str) -> bool:
         """SOL always; midcaps only if proven and book depth is sufficient."""
@@ -672,11 +934,18 @@ class CexDexStrategy:
         )
 
         self._scan_priority_symbol = best_pair
+        opportunity: dict[str, Any] | None = None
         try:
             opportunity = await self._scan_cex_dex_opportunity(
                 gates,
                 priority_symbol=best_pair,
                 scan_pairs=scan_pairs,
+            )
+        except Exception as scan_exc:
+            logger.error(
+                "CEX-DEX scan error | %s",
+                scan_exc,
+                exc_info=True,
             )
         finally:
             self._scan_priority_symbol = None
@@ -1154,6 +1423,7 @@ class CexDexStrategy:
             )
 
         rescued_by_roundtrip = False
+        rescue_negative_sim = False
         if not initially_profitable:
             logger.info(
                 "MODEL_NET_SOFT_RESCUE_ELIGIBLE | pair=%s edge=%.1f net=%.1f conf=%.1f test_mode=%s simulate=%s",
@@ -1181,6 +1451,7 @@ class CexDexStrategy:
                 and not self.settings.simulate
             ):
                 rescue_min_net = _soft_rescue_min_sim_net_bps()
+                rescue_negative_guardrails = _soft_rescue_negative_sim_guardrails(pair.symbol)
                 rescue_sizes: list[int] = []
                 max_trade = self._max_trade_usdc_micro(pair.symbol)
                 rescue_min_trade_micro = _env_int(
@@ -1194,6 +1465,26 @@ class CexDexStrategy:
                     clamped = max(rescue_min_trade_micro, min(max_trade, candidate))
                     if clamped not in rescue_sizes:
                         rescue_sizes.append(clamped)
+                for depth_hint in await self._rescue_depth_size_hints(
+                    pair,
+                    start_size_micro=start_size,
+                    rescue_min_trade_micro=rescue_min_trade_micro,
+                    max_trade_micro=max_trade,
+                ):
+                    if depth_hint not in rescue_sizes:
+                        rescue_sizes.append(depth_hint)
+                if bool(rescue_negative_guardrails.get("enabled", False)):
+                    # Ensure the near-breakeven max-size band is always evaluated explicitly.
+                    cap_usdc = float(rescue_negative_guardrails.get("max_size_usdc", 0.0))
+                    cap_micro = int(cap_usdc * 1_000_000.0)
+                    if cap_micro > 0:
+                        cap_size = max(
+                            rescue_min_trade_micro,
+                            min(max_trade, start_size, cap_micro),
+                        )
+                        if cap_size not in rescue_sizes:
+                            rescue_sizes.append(cap_size)
+                rescue_sizes = sorted(set(rescue_sizes), reverse=True)
 
                 sim_reason = "no_rescue_size"
                 best_fail_sim = float("-inf")
@@ -1204,41 +1495,70 @@ class CexDexStrategy:
                 chosen_sim_net = float(net_bps)
                 chosen_sim_usdc_micro = int(size_usdc)
                 chosen_depth_market = pair.backpack_symbol
+                rescue_negative_sim = False
+                rescue_negative_blocked_reason = ""
                 rescue_timeout_sec = _env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_SIM_TIMEOUT_SEC", 3.5)
+                base_timeout_retries = max(
+                    1,
+                    _env_int("CEX_DEX_MODEL_NET_SOFT_RESCUE_SIM_TIMEOUT_RETRIES", 1),
+                )
+                extra_retries = 0
+                if edge_bps >= _env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_TIMEOUT_EDGE_BPS", 35.0):
+                    extra_retries += 1
+                if str(gates.get("mode") or "") in ("opportunistic", "aggressive"):
+                    extra_retries += 1
+                pair_cfg = (_load_rescue_pair_policy().get("pairs") or {}).get(pair.symbol.upper(), {})
+                if isinstance(pair_cfg, dict):
+                    try:
+                        extra_retries += max(0, int(pair_cfg.get("sim_timeout_retries", 0)))
+                    except (TypeError, ValueError):
+                        pass
+                rescue_timeout_retries = min(
+                    max(base_timeout_retries, 1) + extra_retries,
+                    max(1, _env_int("CEX_DEX_MODEL_NET_SOFT_RESCUE_SIM_TIMEOUT_MAX_RETRIES", 4)),
+                )
                 try:
                     for rescue_size in rescue_sizes:
                         rescue_probe_micro = min(self._probe_usdc_micro(), int(rescue_size))
                         sim_details: dict[str, Any] = {}
-                        try:
-                            sim_ok, sim_net, sim_reason, sim_details = await asyncio.wait_for(
-                                pre_simulate_cex_buy_dex_sell(
-                                    self.jupiter,
-                                    int(rescue_size),
-                                    float(cex_buy),
-                                    backpack_symbol=pair.backpack_symbol,
-                                    base_mint=pair.base_mint,
-                                    base_decimals=pair.base_decimals,
-                                    expected_net_bps=float(net_bps),
-                                    probe_usdc_micro=rescue_probe_micro,
-                                    min_net_bps=rescue_min_net,
-                                ),
-                                timeout=max(0.5, float(rescue_timeout_sec)),
-                            )
-                        except TimeoutError:
-                            sim_ok = False
-                            sim_net = float("-inf")
-                            sim_reason = f"timeout_{rescue_timeout_sec:.1f}s"
-                        except Exception as exc:
-                            sim_ok = False
-                            sim_net = float("-inf")
-                            sim_reason = f"exception:{type(exc).__name__}"
-                            logger.warning(
-                                "MODEL_NET_SOFT_RESCUE_ATTEMPT_FAIL | pair=%s size_usdc=%.2f reason=%s error=%s",
-                                pair.pair_label,
-                                int(rescue_size) / 1_000_000.0,
-                                sim_reason,
-                                exc,
-                            )
+                        sim_ok = False
+                        sim_net = float("-inf")
+                        sim_reason = "no_sim_result"
+                        for sim_attempt in range(rescue_timeout_retries):
+                            try:
+                                sim_ok, sim_net, sim_reason, sim_details = await asyncio.wait_for(
+                                    pre_simulate_cex_buy_dex_sell(
+                                        self.jupiter,
+                                        int(rescue_size),
+                                        float(cex_buy),
+                                        backpack_symbol=pair.backpack_symbol,
+                                        base_mint=pair.base_mint,
+                                        base_decimals=pair.base_decimals,
+                                        expected_net_bps=float(net_bps),
+                                        probe_usdc_micro=rescue_probe_micro,
+                                        min_net_bps=rescue_min_net,
+                                    ),
+                                    timeout=max(0.5, float(rescue_timeout_sec)),
+                                )
+                                break
+                            except TimeoutError:
+                                sim_ok = False
+                                sim_net = float("-inf")
+                                sim_reason = f"timeout_{rescue_timeout_sec:.1f}s"
+                                if sim_attempt + 1 >= rescue_timeout_retries:
+                                    break
+                            except Exception as exc:
+                                sim_ok = False
+                                sim_net = float("-inf")
+                                sim_reason = f"exception:{type(exc).__name__}"
+                                logger.warning(
+                                    "MODEL_NET_SOFT_RESCUE_ATTEMPT_FAIL | pair=%s size_usdc=%.2f reason=%s error=%s",
+                                    pair.pair_label,
+                                    int(rescue_size) / 1_000_000.0,
+                                    sim_reason,
+                                    exc,
+                                )
+                                break
                         if sim_ok:
                             chosen_rescue_size = int(rescue_size)
                             chosen_sim_net = float(sim_net)
@@ -1249,6 +1569,64 @@ class CexDexStrategy:
                                 sim_details.get("cex_depth_market") or pair.backpack_symbol
                             )
                             rescued_by_roundtrip = True
+                            break
+                        allow_negative = bool(rescue_negative_guardrails.get("enabled", False))
+                        max_loss = float(rescue_negative_guardrails.get("max_loss_bps", 0.0))
+                        calibrated_conf = _rescue_recalibrated_confidence(
+                            confidence,
+                            pair.symbol,
+                            float(sim_net),
+                        )
+                        negative_gate_ok = (
+                            allow_negative
+                            and str(sim_reason).startswith("net_below_")
+                            and float(sim_net) >= -max_loss
+                            and edge_bps >= float(rescue_negative_guardrails.get("min_edge_bps", 0.0))
+                            and calibrated_conf
+                            >= float(rescue_negative_guardrails.get("min_ai_conf", 0.0))
+                            and (int(rescue_size) / 1_000_000.0)
+                            <= float(rescue_negative_guardrails.get("max_size_usdc", 0.5))
+                        )
+                        if negative_gate_ok:
+                            budget_ok, budget_reason = self._negative_tier_budget_allows()
+                            if not budget_ok:
+                                rescue_negative_blocked_reason = budget_reason
+                                record_rescue_negative_event(
+                                    pair=pair.pair_label,
+                                    outcome="blocked",
+                                    sim_net_bps=float(sim_net),
+                                    edge_bps=float(edge_bps),
+                                    size_usdc=float(int(rescue_size) / 1_000_000.0),
+                                    blocked_by=budget_reason,
+                                )
+                                continue
+                            chosen_rescue_size = int(rescue_size)
+                            chosen_sim_net = float(sim_net)
+                            chosen_sim_usdc_micro = int(
+                                sim_details.get("usdc_in_micro") or rescue_size
+                            )
+                            chosen_depth_market = str(
+                                sim_details.get("cex_depth_market") or pair.backpack_symbol
+                            )
+                            sim_reason = "soft_negative_band"
+                            rescue_negative_sim = True
+                            rescued_by_roundtrip = True
+                            confidence = calibrated_conf
+                            record_rescue_negative_event(
+                                pair=pair.pair_label,
+                                outcome="pass",
+                                sim_net_bps=chosen_sim_net,
+                                edge_bps=float(edge_bps),
+                                size_usdc=float(chosen_rescue_size / 1_000_000.0),
+                            )
+                            logger.warning(
+                                "MODEL_NET_SOFT_RESCUE_NEGATIVE_SIM_PASS | pair=%s edge=%.1f sim_net=%.2f conf=%.1f size_usdc=%.2f",
+                                pair.pair_label,
+                                edge_bps,
+                                chosen_sim_net,
+                                calibrated_conf,
+                                chosen_rescue_size / 1_000_000.0,
+                            )
                             break
                         if float(sim_net) > best_fail_sim:
                             best_fail_sim = float(sim_net)
@@ -1271,7 +1649,7 @@ class CexDexStrategy:
                 else:
                     if rescued_by_roundtrip:
                         logger.info(
-                            "MODEL_NET_SOFT_RESCUE | pair=%s edge=%.1f modeled_net=%.1f sim_net=%.1f rescue_size_usdc=%.2f sim_usdc=%.2f cex_depth_market=%s",
+                            "MODEL_NET_SOFT_RESCUE | pair=%s edge=%.1f modeled_net=%.1f sim_net=%.1f rescue_size_usdc=%.2f sim_usdc=%.2f cex_depth_market=%s negative_sim=%s",
                             pair.pair_label,
                             edge_bps,
                             net_bps,
@@ -1279,6 +1657,7 @@ class CexDexStrategy:
                             chosen_rescue_size / 1_000_000.0,
                             chosen_sim_usdc_micro / 1_000_000.0,
                             chosen_depth_market,
+                            rescue_negative_sim,
                         )
                         size_usdc = int(chosen_rescue_size)
                         net_bps = max(net_bps, chosen_sim_net)
@@ -1294,6 +1673,54 @@ class CexDexStrategy:
                             best_fail_sim_usdc_micro / 1_000_000.0,
                             best_fail_depth_market,
                         )
+                        allow_negative = bool(rescue_negative_guardrails.get("enabled", False))
+                        max_loss = float(rescue_negative_guardrails.get("max_loss_bps", 0.0))
+                        if (
+                            allow_negative
+                            and best_fail_sim != float("-inf")
+                            and -max_loss <= float(best_fail_sim) < 0.0
+                        ):
+                            block_reasons: list[str] = []
+                            if edge_bps < float(rescue_negative_guardrails.get("min_edge_bps", 0.0)):
+                                block_reasons.append("edge")
+                            if confidence < float(rescue_negative_guardrails.get("min_ai_conf", 0.0)):
+                                block_reasons.append("conf")
+                            if (best_fail_size / 1_000_000.0) > float(
+                                rescue_negative_guardrails.get("max_size_usdc", 0.5)
+                            ):
+                                block_reasons.append("size")
+                            if block_reasons:
+                                record_rescue_negative_event(
+                                    pair=pair.pair_label,
+                                    outcome="blocked",
+                                    sim_net_bps=float(best_fail_sim),
+                                    edge_bps=float(edge_bps),
+                                    size_usdc=float(best_fail_size / 1_000_000.0),
+                                    blocked_by=",".join(block_reasons),
+                                )
+                                logger.info(
+                                    "MODEL_NET_SOFT_RESCUE_NEGATIVE_SIM_BLOCKED | pair=%s sim_net=%.2f edge=%.1f conf=%.1f size_usdc=%.2f blocked_by=%s thresholds=edge>=%.1f,conf>=%.1f,size<=%.2f,loss<=%.1f",
+                                    pair.pair_label,
+                                    best_fail_sim,
+                                    edge_bps,
+                                    confidence,
+                                    best_fail_size / 1_000_000.0,
+                                    ",".join(block_reasons),
+                                    float(rescue_negative_guardrails.get("min_edge_bps", 0.0)),
+                                    float(rescue_negative_guardrails.get("min_ai_conf", 0.0)),
+                                    float(rescue_negative_guardrails.get("max_size_usdc", 0.5)),
+                                    max_loss,
+                                )
+                        elif rescue_negative_blocked_reason:
+                            logger.info(
+                                "MODEL_NET_SOFT_RESCUE_NEGATIVE_SIM_BLOCKED | pair=%s sim_net=%s edge=%.1f conf=%.1f size_usdc=%.2f blocked_by=%s",
+                                pair.pair_label,
+                                fail_preview,
+                                edge_bps,
+                                confidence,
+                                best_fail_size / 1_000_000.0,
+                                rescue_negative_blocked_reason,
+                            )
             rescue_bypass_net = _env_bool("CEX_DEX_MODEL_NET_SOFT_RESCUE_BYPASS_NET_GATE", True)
             rescued_gate_ok = False
             if rescued_by_roundtrip and rescue_bypass_net:
@@ -1391,6 +1818,10 @@ class CexDexStrategy:
             "jup_probe_quote": probe_quote,
             "gate_mode": gates.get("mode", "strict"),
             "dynamic_gates": gates,
+            "rescue_negative_sim": bool(rescue_negative_sim),
+            "rescue_negative_pair_policy": bool(
+                isinstance(((_load_rescue_pair_policy().get("pairs") or {}).get(pair.symbol.upper())), dict)
+            ),
         }
 
     async def get_safe_trade_size(self) -> int:
@@ -1725,6 +2156,25 @@ class CexDexStrategy:
         size_micro = int(opp["size_usdc"])
         if not self.risk.can_trade(size_micro):
             return False
+        is_negative_tier = bool(opp.get("rescue_negative_sim") is True)
+        if is_negative_tier:
+            budget_ok, budget_reason = self._negative_tier_budget_allows()
+            if not budget_ok:
+                logger.warning(
+                    "BLOCKED: negative-sim tier budget | reason=%s pair=%s",
+                    budget_reason,
+                    str(opp.get("pair_label") or "SOL/USDC"),
+                )
+                record_rescue_negative_event(
+                    pair=str(opp.get("pair_label") or "SOL/USDC"),
+                    outcome="blocked",
+                    sim_net_bps=float(opp.get("net_bps") or 0.0),
+                    edge_bps=float(opp.get("edge_bps") or opp.get("gross_bps") or 0.0),
+                    size_usdc=float(size_micro / 1_000_000.0),
+                    blocked_by=f"budget:{budget_reason}",
+                )
+                return False
+            self._negative_tier_record_attempt()
 
         gross_bps = float(opp.get("gross_bps") or opp.get("edge_bps") or 0)
         net_bps = float(opp.get("net_bps") or 0)
@@ -1968,6 +2418,8 @@ class CexDexStrategy:
             )
             if slippage_logged > 0:
                 record_execution_slippage("cex_dex", slippage_logged)
+            if is_negative_tier:
+                self._negative_tier_record_outcome(True)
             return True
 
         self.risk.record_trade_result(-50.0, size_micro)
@@ -1980,6 +2432,8 @@ class CexDexStrategy:
         self._record_win_rate_outcome(
             opp, success=False, realized_usdc=-50.0, trade_id=trade_id
         )
+        if is_negative_tier:
+            self._negative_tier_record_outcome(False)
         return False
 
     async def _execute_jupiter_sell_with_retries(
