@@ -97,6 +97,7 @@
     "restart:monitor:sh": "bash scripts/restart-monitor.sh",
     "logs:tail": "node scripts/logs-tail.mjs",
     "logs:errors": "node scripts/logs-errors.mjs",
+    "ops:auto-relax:min-sim-net": "bash ops/auto-relax-min-sim-net.sh",
     "health:quick": "node scripts/health-quick.mjs",
     "sim:local": "node scripts/sim-local.mjs",
     "verify:live": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-live.ps1",
