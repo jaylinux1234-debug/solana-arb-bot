@@ -160,9 +160,12 @@ def _load_proven_midcaps() -> frozenset[str]:
 
 
 def _soft_rescue_symbols() -> set[str]:
-    raw = (os.getenv("CEX_DEX_MODEL_NET_SOFT_RESCUE_SYMBOLS") or "SOL,WIF").strip()
+    raw = (
+        os.getenv("CEX_DEX_MODEL_NET_SOFT_RESCUE_SYMBOLS")
+        or "SOL,WIF,BONK,POPCAT,MEW,PNUT,FARTCOIN"
+    ).strip()
     if not raw:
-        return {"SOL", "WIF"}
+        return {"SOL", "WIF", "BONK", "POPCAT", "MEW", "PNUT", "FARTCOIN"}
     return {s.strip().upper() for s in raw.split(",") if s.strip()}
 
 
@@ -852,7 +855,8 @@ class CexDexStrategy:
     def _focus_scan_symbols(self) -> set[str] | None:
         """Liquid pairs for detect loop; ``all`` / empty disables focus filter."""
         raw = os.getenv(
-            "CEX_DEX_FOCUS_SCAN_SYMBOLS", "SOL,BONK,WIF,POPCAT,MEW,PNUT"
+            "CEX_DEX_FOCUS_SCAN_SYMBOLS",
+            "SOL,BONK,WIF,POPCAT,MEW,PNUT,FARTCOIN",
         ).strip()
         if raw.lower() in ("", "all", "*", "none", "false", "0"):
             return None
@@ -915,7 +919,7 @@ class CexDexStrategy:
             return False
 
         scan_pairs = [pair for pair, _ in ranked_pairs]
-        top_n = _env_int("CEX_DEX_EXEC_SCAN_TOP_N", 3)
+        top_n = _env_int("CEX_DEX_EXEC_SCAN_TOP_N", 4)
         if top_n > 0:
             scan_pairs = scan_pairs[:top_n]
 

@@ -35,7 +35,7 @@ def strategy() -> CexDexStrategy:
 def test_pairs_for_scan_prioritizes_vol_gate_best(strategy: CexDexStrategy, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CEX_DEX_FOCUS_SCAN_SYMBOLS", "all")
     ordered = strategy._pairs_for_scan("WIF")
-    assert [p.symbol for p in ordered] == ["WIF", "SOL", "BONK", "POPCAT"]
+    assert [p.symbol for p in ordered] == ["WIF", "SOL", "BONK", "POPCAT", "MEW", "PNUT"]
 
 
 def test_pairs_for_scan_liquid_focus_default(strategy: CexDexStrategy, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,4 +47,4 @@ def test_pairs_for_scan_liquid_focus_default(strategy: CexDexStrategy, monkeypat
 def test_focus_scan_symbols_all_disables_filter(strategy: CexDexStrategy, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CEX_DEX_FOCUS_SCAN_SYMBOLS", "all")
     assert strategy._focus_scan_symbols() is None
-    assert len(strategy._pairs_for_scan(None)) == 4
+    assert len(strategy._pairs_for_scan(None)) == 6
