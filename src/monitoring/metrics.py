@@ -137,6 +137,29 @@ try:
         ["pair", "outcome"],
         buckets=[-20, -15, -12, -10, -8, -6, -5, -4, -3, -2, -1, 0],
     )
+    cex_dex_roundtrip_divergence_total = Counter(
+        "cex_dex_roundtrip_divergence_total",
+        "Rescue-vs-execution roundtrip divergence outcomes",
+        ["pair", "outcome", "reason"],
+    )
+    cex_dex_roundtrip_delta_bps = Histogram(
+        "cex_dex_roundtrip_delta_bps",
+        "Absolute divergence between rescue and execute roundtrip sim net (bps)",
+        ["pair", "outcome"],
+        buckets=[0, 1, 2, 3, 5, 8, 12, 20, 30, 50, 80, 120],
+    )
+    cex_dex_roundtrip_exec_sim_bps = Histogram(
+        "cex_dex_roundtrip_exec_sim_bps",
+        "Execute-time roundtrip sim net distribution (bps)",
+        ["pair", "outcome"],
+        buckets=[-80, -60, -40, -30, -20, -15, -10, -8, -5, -2, 0, 1, 2, 5, 10, 20],
+    )
+    cex_dex_roundtrip_rescue_to_exec_ms = Histogram(
+        "cex_dex_roundtrip_rescue_to_exec_ms",
+        "Elapsed time between rescue pass and execute-time re-sim (ms)",
+        ["pair", "outcome"],
+        buckets=[100, 250, 500, 1000, 2000, 5000, 10000, 20000, 30000, 60000],
+    )
     rpc_request_latency_seconds = Histogram(
         "rpc_request_latency_seconds",
         "RPC HTTP request latency",
@@ -187,6 +210,10 @@ except ImportError:
     cex_dex_probe_exec_decay_hist = None  # type: ignore[assignment,misc]
     cex_dex_rescue_negative_total = None  # type: ignore[assignment,misc]
     cex_dex_rescue_negative_sim_bps = None  # type: ignore[assignment,misc]
+    cex_dex_roundtrip_divergence_total = None  # type: ignore[assignment,misc]
+    cex_dex_roundtrip_delta_bps = None  # type: ignore[assignment,misc]
+    cex_dex_roundtrip_exec_sim_bps = None  # type: ignore[assignment,misc]
+    cex_dex_roundtrip_rescue_to_exec_ms = None  # type: ignore[assignment,misc]
     rpc_request_latency_seconds = None  # type: ignore[assignment,misc]
     inventory_reconcile_ok = None  # type: ignore[assignment,misc]
     circuit_breaker_tripped = None  # type: ignore[assignment,misc]
@@ -470,6 +497,56 @@ def record_rescue_negative_event(
         float(sim_net_bps),
         float(edge_bps),
         float(size_usdc),
+    )
+
+
+def record_roundtrip_divergence_event(
+    *,
+    pair: str,
+    outcome: str,
+    reason: str,
+    rescue_sim_bps: float | None,
+    exec_sim_bps: float,
+    rescue_to_exec_ms: float | None = None,
+) -> None:
+    pair_label = (pair or "UNKNOWN").strip().upper() or "UNKNOWN"
+    out = (outcome or "unknown").strip().lower() or "unknown"
+    why = (reason or "none").strip().lower() or "none"
+
+    if cex_dex_roundtrip_divergence_total is not None:
+        cex_dex_roundtrip_divergence_total.labels(
+            pair=pair_label,
+            outcome=out,
+            reason=why,
+        ).inc()
+
+    if cex_dex_roundtrip_exec_sim_bps is not None:
+        cex_dex_roundtrip_exec_sim_bps.labels(pair=pair_label, outcome=out).observe(
+            float(exec_sim_bps)
+        )
+
+    delta_abs = None
+    if rescue_sim_bps is not None:
+        delta_abs = abs(float(rescue_sim_bps) - float(exec_sim_bps))
+        if cex_dex_roundtrip_delta_bps is not None:
+            cex_dex_roundtrip_delta_bps.labels(pair=pair_label, outcome=out).observe(delta_abs)
+
+    if rescue_to_exec_ms is not None and rescue_to_exec_ms >= 0:
+        if cex_dex_roundtrip_rescue_to_exec_ms is not None:
+            cex_dex_roundtrip_rescue_to_exec_ms.labels(
+                pair=pair_label,
+                outcome=out,
+            ).observe(float(rescue_to_exec_ms))
+
+    logger.info(
+        "ROUNDTRIP_DIVERGENCE | pair=%s outcome=%s reason=%s rescue_sim=%s exec_sim=%.2f delta_abs=%s rescue_to_exec_ms=%s",
+        pair_label,
+        out,
+        why,
+        "n/a" if rescue_sim_bps is None else f"{float(rescue_sim_bps):.2f}",
+        float(exec_sim_bps),
+        "n/a" if delta_abs is None else f"{delta_abs:.2f}",
+        "n/a" if rescue_to_exec_ms is None else f"{float(rescue_to_exec_ms):.0f}",
     )
 
 

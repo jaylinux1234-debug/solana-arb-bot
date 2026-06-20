@@ -38,6 +38,7 @@ from src.monitoring.metrics import (
     record_execution_slippage,
     record_probe_exec_decay,
     record_rescue_negative_event,
+    record_roundtrip_divergence_event,
     record_trade_execution,
     record_trade_opportunity,
     record_trade_signal,
@@ -341,6 +342,7 @@ class CexDexStrategy:
         self._proven_midcaps = _load_proven_midcaps()
         self._pairs = self._load_tradeable_pairs()
         self._scan_priority_symbol: str | None = None
+        self._pair_roundtrip_fail_state: dict[str, dict[str, float | int]] = {}
         logger.info(
             "CEX-DEX pairs | count=%d proven_midcaps=%s symbols=%s",
             len(self._pairs),
@@ -1495,6 +1497,8 @@ class CexDexStrategy:
                 chosen_sim_net = float(net_bps)
                 chosen_sim_usdc_micro = int(size_usdc)
                 chosen_depth_market = pair.backpack_symbol
+                chosen_sim_details: dict[str, Any] = {}
+                detect_ts_ms = int(time.time() * 1000)
                 rescue_negative_sim = False
                 rescue_negative_blocked_reason = ""
                 rescue_timeout_sec = _env_float("CEX_DEX_MODEL_NET_SOFT_RESCUE_SIM_TIMEOUT_SEC", 3.5)
@@ -1565,6 +1569,7 @@ class CexDexStrategy:
                             chosen_sim_usdc_micro = int(
                                 sim_details.get("usdc_in_micro") or rescue_size
                             )
+                            chosen_sim_details = dict(sim_details)
                             chosen_depth_market = str(
                                 sim_details.get("cex_depth_market") or pair.backpack_symbol
                             )
@@ -1605,6 +1610,7 @@ class CexDexStrategy:
                             chosen_sim_usdc_micro = int(
                                 sim_details.get("usdc_in_micro") or rescue_size
                             )
+                            chosen_sim_details = dict(sim_details)
                             chosen_depth_market = str(
                                 sim_details.get("cex_depth_market") or pair.backpack_symbol
                             )
@@ -1795,6 +1801,12 @@ class CexDexStrategy:
             confidence,
             gross_bps=edge_bps,
         )
+        rescue_quote_return_bps = None
+        if chosen_sim_details:
+            in_micro = int(chosen_sim_details.get("usdc_in_micro") or 0)
+            out_micro = int(chosen_sim_details.get("usdc_back_micro") or 0)
+            if in_micro > 0 and out_micro > 0:
+                rescue_quote_return_bps = ((out_micro - in_micro) / in_micro) * 10_000.0
         return {
             "symbol": pair.symbol,
             "pair_label": pair.pair_label,
@@ -1819,6 +1831,18 @@ class CexDexStrategy:
             "gate_mode": gates.get("mode", "strict"),
             "dynamic_gates": gates,
             "rescue_negative_sim": bool(rescue_negative_sim),
+            "detect_ts_ms": detect_ts_ms if "detect_ts_ms" in locals() else int(time.time() * 1000),
+            "rescue_sim_net_bps": float(chosen_sim_net) if rescued_by_roundtrip else None,
+            "rescue_roundtrip_min_bps": (
+                float(chosen_sim_details.get("min_net_bps")) if chosen_sim_details else None
+            ),
+            "rescue_sim_usdc_micro": int(chosen_sim_usdc_micro) if rescued_by_roundtrip else None,
+            "rescue_cex_effective_buy_price": (
+                float(chosen_sim_details.get("cex_effective_buy_price"))
+                if chosen_sim_details.get("cex_effective_buy_price") is not None
+                else None
+            ),
+            "rescue_quote_return_bps": rescue_quote_return_bps,
             "rescue_negative_pair_policy": bool(
                 isinstance(((_load_rescue_pair_policy().get("pairs") or {}).get(pair.symbol.upper())), dict)
             ),
@@ -1937,6 +1961,76 @@ class CexDexStrategy:
             )
         except Exception as exc:
             logger.debug("log_blocked_attempt skipped: %s", exc)
+
+    def _pair_roundtrip_cooling(self, pair_label: str) -> tuple[bool, str]:
+        label = (pair_label or "UNKNOWN").strip().upper() or "UNKNOWN"
+        state = self._pair_roundtrip_fail_state.get(label)
+        if not state:
+            return False, ""
+        streak = int(state.get("streak") or 0)
+        limit = max(1, _env_int("CEX_DEX_EXEC_ROUNDTRIP_FAIL_STREAK", 3))
+        if streak < limit:
+            return False, ""
+        cooldown_sec = max(30, _env_int("CEX_DEX_EXEC_ROUNDTRIP_FAIL_COOLDOWN_SEC", 900))
+        last_ts = float(state.get("last_ts") or 0.0)
+        age = time.time() - last_ts
+        if age >= cooldown_sec:
+            return False, ""
+        return True, f"roundtrip_fail_streak_{streak}/{limit}_cooldown_{int(cooldown_sec-age)}s"
+
+    def _pair_roundtrip_record_fail(self, pair_label: str, sim_net_bps: float) -> None:
+        label = (pair_label or "UNKNOWN").strip().upper() or "UNKNOWN"
+        state = self._pair_roundtrip_fail_state.get(label, {"streak": 0})
+        streak = int(state.get("streak") or 0) + 1
+        self._pair_roundtrip_fail_state[label] = {
+            "streak": streak,
+            "last_ts": time.time(),
+            "last_sim_net_bps": float(sim_net_bps),
+        }
+
+    def _pair_roundtrip_record_success(self, pair_label: str, sim_net_bps: float) -> None:
+        label = (pair_label or "UNKNOWN").strip().upper() or "UNKNOWN"
+        self._pair_roundtrip_fail_state[label] = {
+            "streak": 0,
+            "last_ts": time.time(),
+            "last_sim_net_bps": float(sim_net_bps),
+        }
+
+    async def _inventory_snapshot(self) -> dict[str, float]:
+        try:
+            onchain_usdc = float(await get_onchain_usdc_balance())
+        except Exception:
+            onchain_usdc = 0.0
+        try:
+            wallet_sol = float(await self.get_wallet_sol_balance())
+        except Exception:
+            wallet_sol = 0.0
+        try:
+            backpack_usdc = float(await self.backpack.get_balance("USDC"))
+        except Exception:
+            backpack_usdc = 0.0
+        return {
+            "onchain_usdc": onchain_usdc,
+            "wallet_sol": wallet_sol,
+            "backpack_usdc": backpack_usdc,
+        }
+
+    def _log_inventory_shift(
+        self,
+        pair_label: str,
+        *,
+        before: dict[str, float],
+        after: dict[str, float],
+        path: str,
+    ) -> None:
+        logger.info(
+            "INVENTORY_SHIFT | pair=%s path=%s d_onchain_usdc=%.4f d_wallet_sol=%.6f d_backpack_usdc=%.4f",
+            pair_label,
+            path,
+            float(after.get("onchain_usdc", 0.0) - before.get("onchain_usdc", 0.0)),
+            float(after.get("wallet_sol", 0.0) - before.get("wallet_sol", 0.0)),
+            float(after.get("backpack_usdc", 0.0) - before.get("backpack_usdc", 0.0)),
+        )
 
     def _record_win_rate_outcome(
         self,
@@ -2202,6 +2296,17 @@ class CexDexStrategy:
         bp_symbol = str(opp.get("backpack_symbol") or "SOL_USDC")
         pair_label = str(opp.get("pair_label") or "SOL/USDC")
         base_symbol = str(opp.get("symbol") or pair_label.split("/")[0]).strip().upper()
+        if (
+            not self.settings.test_mode
+            and not self.settings.simulate
+            and _env_bool("CEX_DEX_EXEC_ROUNDTRIP_COOLDOWN_ENABLED", True)
+        ):
+            cooling, cooling_reason = self._pair_roundtrip_cooling(pair_label)
+            if cooling:
+                logger.warning("BLOCKED: pair cooldown | %s %s", pair_label, cooling_reason)
+                self._log_blocked_attempt(opp, f"pair_cooldown:{cooling_reason}")
+                record_trade_execution("cex_dex", success=False, pnl_usd=0.0)
+                return False
 
         if self.settings.test_mode or self.settings.simulate:
             logger.info(
@@ -2299,24 +2404,142 @@ class CexDexStrategy:
             run_roundtrip_sim = _env_bool("CEX_DEX_ROUNDTRIP_SIM_INVENTORY", False)
         if run_roundtrip_sim:
             roundtrip = RoundtripSimulator(self.jupiter, settings=self.settings)
-            sim_ok, sim_net, sim_reason, sim_details = await roundtrip.run_roundtrip(
-                cex_px,
-                size_micro,
-                backpack_symbol=bp_symbol,
-                base_mint=str(opp.get("base_mint") or SOL_MINT),
-                base_decimals=int(opp.get("base_decimals") or 9),
-                expected_net_bps=float(opp.get("net_bps") or 0),
+            rescue_sim = (
+                float(opp.get("rescue_sim_net_bps"))
+                if opp.get("rescue_sim_net_bps") is not None
+                else None
             )
+            rescue_ts = int(opp.get("detect_ts_ms") or 0)
+            rescue_exec_ms = float(max(0, (int(time.time() * 1000) - rescue_ts))) if rescue_ts > 0 else None
+            rescue_quote_return = (
+                float(opp.get("rescue_quote_return_bps"))
+                if opp.get("rescue_quote_return_bps") is not None
+                else None
+            )
+            rescue_cex_eff = (
+                float(opp.get("rescue_cex_effective_buy_price"))
+                if opp.get("rescue_cex_effective_buy_price") is not None
+                else None
+            )
+
+            candidate_sizes = self._exec_size_ladder(base_symbol, size_micro)
+            if int(size_micro) not in candidate_sizes:
+                candidate_sizes = [int(size_micro), *candidate_sizes]
+            best_fail: tuple[float, str, dict[str, Any], int] | None = None
+            sim_ok = False
+            sim_net = float("-inf")
+            sim_reason = "no_exec_sim"
+            sim_details: dict[str, Any] = {}
+            chosen_exec_size = int(size_micro)
+
+            for idx, candidate_size in enumerate(candidate_sizes):
+                one_ok, one_net, one_reason, one_details = await roundtrip.run_roundtrip(
+                    cex_px,
+                    int(candidate_size),
+                    backpack_symbol=bp_symbol,
+                    base_mint=str(opp.get("base_mint") or SOL_MINT),
+                    base_decimals=int(opp.get("base_decimals") or 9),
+                    expected_net_bps=float(opp.get("net_bps") or 0),
+                )
+                if one_ok:
+                    sim_ok = True
+                    sim_net = float(one_net)
+                    sim_reason = str(one_reason)
+                    sim_details = dict(one_details)
+                    chosen_exec_size = int(candidate_size)
+                    break
+                if best_fail is None or float(one_net) > float(best_fail[0]):
+                    best_fail = (float(one_net), str(one_reason), dict(one_details), int(candidate_size))
+                if idx + 1 < len(candidate_sizes):
+                    logger.info(
+                        "EXEC_ROUNDTRIP_RETRY | pair=%s try_size_usdc=%.2f failed_net=%.2f reason=%s next_retry=%s",
+                        pair_label,
+                        candidate_size / 1_000_000.0,
+                        float(one_net),
+                        str(one_reason),
+                        idx + 2,
+                    )
+
+            if not sim_ok and best_fail is not None:
+                sim_net, sim_reason, sim_details, chosen_exec_size = best_fail
+
+            min_net_gate = float(sim_details.get("min_net_bps") or roundtrip_sim_min_net_bps())
+            drift_soft_band = _env_float("CEX_DEX_EXEC_ROUNDTRIP_DRIFT_SOFT_BAND_BPS", 0.35)
+            drift_max = _env_float("CEX_DEX_EXEC_ROUNDTRIP_DRIFT_MAX_BPS", 12.0)
+            soft_pass = False
+            if not sim_ok and rescue_sim is not None:
+                drift = float(rescue_sim) - float(sim_net)
+                if (
+                    rescue_sim >= min_net_gate
+                    and float(sim_net) >= (min_net_gate - drift_soft_band)
+                    and drift <= drift_max
+                ):
+                    soft_pass = True
+                    sim_ok = True
+                    sim_reason = f"exec_soft_pass_drift_{drift:.2f}"
+
+            if chosen_exec_size != int(size_micro):
+                logger.info(
+                    "EXEC_SIZE_DOWNSHIFT | pair=%s from_usdc=%.2f to_usdc=%.2f sim_net=%.2f reason=%s",
+                    pair_label,
+                    size_micro / 1_000_000.0,
+                    chosen_exec_size / 1_000_000.0,
+                    float(sim_net),
+                    sim_reason,
+                )
+                size_micro = int(chosen_exec_size)
+                opp["size_usdc"] = int(chosen_exec_size)
+                opp["size_usdc_micro"] = int(chosen_exec_size)
+
+            if rescue_sim is not None:
+                record_roundtrip_divergence_event(
+                    pair=pair_label,
+                    outcome="soft_pass" if soft_pass else ("pass" if sim_ok else "blocked"),
+                    reason=sim_reason,
+                    rescue_sim_bps=float(rescue_sim),
+                    exec_sim_bps=float(sim_net),
+                    rescue_to_exec_ms=rescue_exec_ms,
+                )
+
+            exec_quote_return = None
+            in_micro = int(sim_details.get("usdc_in_micro") or 0)
+            out_micro = int(sim_details.get("usdc_back_micro") or 0)
+            if in_micro > 0 and out_micro > 0:
+                exec_quote_return = ((out_micro - in_micro) / in_micro) * 10_000.0
+            cex_exec_eff = (
+                float(sim_details.get("cex_effective_buy_price"))
+                if sim_details.get("cex_effective_buy_price") is not None
+                else None
+            )
+            cex_drift_bps = None
+            if rescue_cex_eff and cex_exec_eff and rescue_cex_eff > 0:
+                cex_drift_bps = ((cex_exec_eff - rescue_cex_eff) / rescue_cex_eff) * 10_000.0
+            quote_drift_bps = None
+            if rescue_quote_return is not None and exec_quote_return is not None:
+                quote_drift_bps = float(exec_quote_return) - float(rescue_quote_return)
+
             if not sim_ok:
+                self._pair_roundtrip_record_fail(pair_label, float(sim_net))
                 logger.warning(
-                    "BLOCKED: roundtrip pre-sim | net=%.1fbps reason=%s hops=%s",
-                    sim_net,
+                    "BLOCKED: roundtrip pre-sim | net=%.1fbps reason=%s hops=%s rescue_sim=%s delta=%s cex_drift=%s quote_drift=%s rescue_to_exec_ms=%s",
+                    float(sim_net),
                     sim_reason,
                     sim_details.get("route_hops"),
+                    "n/a" if rescue_sim is None else f"{float(rescue_sim):.2f}",
+                    (
+                        "n/a"
+                        if rescue_sim is None
+                        else f"{(float(rescue_sim) - float(sim_net)):.2f}"
+                    ),
+                    "n/a" if cex_drift_bps is None else f"{cex_drift_bps:.2f}",
+                    "n/a" if quote_drift_bps is None else f"{quote_drift_bps:.2f}",
+                    "n/a" if rescue_exec_ms is None else f"{rescue_exec_ms:.0f}",
                 )
                 self._log_blocked_attempt(opp, f"roundtrip_sim:{sim_reason}")
                 record_trade_execution("cex_dex", success=False, pnl_usd=0.0)
                 return False
+
+            self._pair_roundtrip_record_success(pair_label, float(sim_net))
 
             if _env_bool("CEX_DEX_JUPITER_ROUNDTRIP_CHECK", False):
                 jup_ok, jup_net, jup_reason = await pre_simulate_full_jupiter_roundtrip(
@@ -2331,6 +2554,19 @@ class CexDexStrategy:
                     )
                     record_trade_execution("cex_dex", success=False, pnl_usd=0.0)
                     return False
+
+        required_lamports = self._estimate_sell_lamports(
+            size_micro,
+            cex_px,
+            base_decimals=int(opp.get("base_decimals") or 9),
+        )
+        opp["size_lamports"] = required_lamports
+        wallet_sol = await self.get_wallet_sol_balance()
+        wallet_lamports = int(wallet_sol * 1_000_000_000)
+        use_inventory = (
+            _env_bool("CEX_DEX_INVENTORY_FIRST", True)
+            and wallet_lamports >= int(required_lamports * inventory_buffer)
+        )
 
         from src.core.onchain_profit import assert_roundtrip_profit, fetch_usdc_balance_micro
 
@@ -2355,6 +2591,8 @@ class CexDexStrategy:
             self._log_blocked_attempt(opp, "midcap_live_disabled")
             record_trade_execution("cex_dex", success=False, pnl_usd=0.0)
             return False
+
+        inv_before = await self._inventory_snapshot()
 
         if use_inventory:
             logger.info("Using on-chain inventory (fast path)")
@@ -2392,6 +2630,15 @@ class CexDexStrategy:
                 cex_px=cex_px,
                 wallet=wallet,
             )
+
+        inv_after = await self._inventory_snapshot()
+        self._log_inventory_shift(
+            pair_label,
+            before=inv_before,
+            after=inv_after,
+            path=str(opp.get("_execution_path") or ("inventory" if use_inventory else "cex_withdraw")),
+        )
+
         profit_usdc = (opp["net_bps"] / 10000.0) * (size_micro / 1_000_000.0)
         slippage_logged = float(opp.get("_last_exec_slippage_bps") or 0.0)
         if swap_ok:
