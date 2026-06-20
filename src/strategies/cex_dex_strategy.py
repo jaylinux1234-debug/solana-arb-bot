@@ -959,13 +959,36 @@ class CexDexStrategy:
         finally:
             self._scan_priority_symbol = None
         if opportunity:
-            result = await self._execute_smart_path(opportunity)
-            logged = await self._log_trade(result)
-            return bool(
-                logged.get("live_fill")
-                or logged.get("success")
-                or result.get("success")
-            )
+            execution_queue: list[dict[str, Any]] = [opportunity]
+            for queued in opportunity.get("_candidate_queue") or []:
+                if not isinstance(queued, dict):
+                    continue
+                prepared = await self._scan_cex_dex_opportunity(
+                    gates,
+                    candidate_override=queued,
+                )
+                if prepared is None:
+                    continue
+                execution_queue.append(prepared)
+
+            max_exec = max(1, _env_int("CEX_DEX_EXEC_CANDIDATE_EXEC_N", 3))
+            for idx, candidate in enumerate(execution_queue[:max_exec], start=1):
+                logger.info(
+                    "EXEC_CANDIDATE_TRY | idx=%d/%d pair=%s rank=%.1fbps",
+                    idx,
+                    min(len(execution_queue), max_exec),
+                    str(candidate.get("pair_label") or "SOL/USDC"),
+                    float(candidate.get("rank_bps") or candidate.get("net_bps") or 0.0),
+                )
+                result = await self._execute_smart_path(candidate)
+                logged = await self._log_trade(result)
+                if bool(
+                    logged.get("live_fill")
+                    or logged.get("success")
+                    or result.get("success")
+                ):
+                    return True
+            return False
 
         reverse_result = await self.reverse_strategy.scan_and_execute()
         if reverse_result.get("live_fill"):
@@ -985,15 +1008,29 @@ class CexDexStrategy:
         *,
         priority_symbol: str | None = None,
         scan_pairs: list[CexDexPair] | None = None,
+        candidate_override: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Scan all configured pairs; return best execution-ready opportunity."""
-        opp = await self.detect_opportunity(
-            gates,
-            priority_symbol=priority_symbol,
-            scan_pairs=scan_pairs,
-        )
+        if candidate_override is not None:
+            opp = dict(candidate_override)
+        else:
+            opp = await self.detect_opportunity(
+                gates,
+                priority_symbol=priority_symbol,
+                scan_pairs=scan_pairs,
+            )
         if opp is None:
             return None
+
+        return await self._prepare_execution_candidate(opp, gates=gates)
+
+    async def _prepare_execution_candidate(
+        self,
+        opp: dict[str, Any],
+        *,
+        gates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Normalize one detected opportunity into an execution-ready candidate."""
 
         ai_conf = float(opp.get("confidence") or 0.0)
         min_ai = float(
@@ -1010,6 +1047,46 @@ class CexDexStrategy:
                 pair=str(opp.get("pair_label") or ""),
             )
             return None
+
+        lifecycle = self._pair_lifecycle_profile(str(opp.get("pair_label") or "SOL/USDC"))
+        if not bool(lifecycle.get("allow_live", True)):
+            self.log_near_miss(
+                float(opp.get("gross_bps") or opp.get("edge_bps") or 0),
+                float(opp.get("net_bps") or 0),
+                ai_conf,
+                "lifecycle_paper",
+                pair=str(opp.get("pair_label") or ""),
+            )
+            return None
+
+        extra_net = float(lifecycle.get("extra_net_bps") or 0.0)
+        min_net = float(gates.get("min_net") or self.settings.CEX_DEX_MIN_NET_SPREAD_BPS)
+        if float(opp.get("net_bps") or 0.0) < (min_net + extra_net):
+            self.log_near_miss(
+                float(opp.get("gross_bps") or opp.get("edge_bps") or 0),
+                float(opp.get("net_bps") or 0),
+                ai_conf,
+                "lifecycle_net_gate",
+                pair=str(opp.get("pair_label") or ""),
+            )
+            return None
+
+        max_size_usdc = float(lifecycle.get("max_size_usdc") or 0.0)
+        if max_size_usdc > 0:
+            cap_micro = int(max_size_usdc * 1_000_000.0)
+            cur_micro = int(opp.get("size_usdc") or opp.get("size_usdc_micro") or 0)
+            if cur_micro > cap_micro > 0:
+                opp["size_usdc"] = cap_micro
+                opp["size_usdc_micro"] = cap_micro
+                logger.info(
+                    "PAIR_LIFECYCLE_SIZE_CAP | pair=%s mode=%s from=%.2f to=%.2f",
+                    str(opp.get("pair_label") or "SOL/USDC"),
+                    str(lifecycle.get("mode") or "full"),
+                    cur_micro / 1_000_000.0,
+                    cap_micro / 1_000_000.0,
+                )
+
+        opp["lifecycle_mode"] = str(lifecycle.get("mode") or "full")
 
         opp["type"] = "cex_dex"
         opp["ai_conf"] = ai_conf
@@ -1173,6 +1250,13 @@ class CexDexStrategy:
                 opp.get("confidence"),
                 rank_bps,
             )
+        queue_n = max(1, _env_int("CEX_DEX_EXEC_CANDIDATE_QUEUE_N", 3))
+        if best is not None:
+            best["rank_bps"] = float(best_rank)
+            best["_candidate_queue"] = [
+                {**candidate, "rank_bps": float(rank_bps)}
+                for rank_bps, candidate in ranked_candidates[1:queue_n]
+            ]
         if best:
             logger.info(
                 "OPPORTUNITY | pair=%s edge=%.1fbps net=%.1fbps rank=%.1fbps score=%.2f route_bonus=%.1f size=$%.2f conf=%.1f%%",
@@ -1186,6 +1270,84 @@ class CexDexStrategy:
                 best.get("confidence"),
             )
         return best
+
+    def _pair_lifecycle_profile(self, pair_label: str) -> dict[str, float | str | bool]:
+        """Stateful per-pair lifecycle profile used to gate and size live execution."""
+        state = self._pair_quality_snapshot(pair_label)
+        attempts = int(state.get("attempts") or 0)
+        score = self._pair_fill_score(pair_label)
+        warmup = max(1, _env_int("CEX_DEX_LIFECYCLE_WARMUP_ATTEMPTS", 4))
+        paper_floor = max(0.0, min(1.0, _env_float("CEX_DEX_LIFECYCLE_PAPER_SCORE", 0.20)))
+        micro_floor = max(0.0, min(1.0, _env_float("CEX_DEX_LIFECYCLE_MICRO_SCORE", 0.45)))
+
+        mode = "full"
+        allow_live = True
+        if attempts < warmup:
+            mode = "observe"
+        elif score < paper_floor:
+            mode = "paper"
+            allow_live = _env_bool("CEX_DEX_LIFECYCLE_PAPER_ALLOW_LIVE", False)
+        elif score < micro_floor:
+            mode = "micro"
+
+        observe_cap = max(2.0, _env_float("CEX_DEX_LIFECYCLE_OBSERVE_MAX_USDC", 8.0))
+        micro_cap = max(observe_cap, _env_float("CEX_DEX_LIFECYCLE_MICRO_MAX_USDC", 14.0))
+        paper_cap = max(1.0, _env_float("CEX_DEX_LIFECYCLE_PAPER_MAX_USDC", 5.0))
+        observe_extra = max(0.0, _env_float("CEX_DEX_LIFECYCLE_OBSERVE_EXTRA_NET_BPS", 0.5))
+        micro_extra = max(0.0, _env_float("CEX_DEX_LIFECYCLE_MICRO_EXTRA_NET_BPS", 0.25))
+        paper_extra = max(0.0, _env_float("CEX_DEX_LIFECYCLE_PAPER_EXTRA_NET_BPS", 1.0))
+
+        if mode == "observe":
+            return {
+                "mode": mode,
+                "allow_live": allow_live,
+                "max_size_usdc": observe_cap,
+                "extra_net_bps": observe_extra,
+            }
+        if mode == "micro":
+            return {
+                "mode": mode,
+                "allow_live": allow_live,
+                "max_size_usdc": micro_cap,
+                "extra_net_bps": micro_extra,
+            }
+        if mode == "paper":
+            return {
+                "mode": mode,
+                "allow_live": allow_live,
+                "max_size_usdc": paper_cap,
+                "extra_net_bps": paper_extra,
+            }
+        return {
+            "mode": "full",
+            "allow_live": True,
+            "max_size_usdc": 0.0,
+            "extra_net_bps": 0.0,
+        }
+
+    def _pair_adaptive_rescue_profile(self, pair_label: str) -> dict[str, float]:
+        """Adaptive per-pair rescue thresholds from recent conversion quality."""
+        state = self._pair_quality_snapshot(pair_label)
+        score = self._pair_fill_score(pair_label)
+        drift_ema = float(state.get("drift_ema_abs") or 0.0)
+
+        min_net_delta = 0.0
+        size_mult = 1.0
+        if score < 0.35:
+            min_net_delta += _env_float("CEX_DEX_ADAPTIVE_RESCUE_LOW_SCORE_MIN_NET_DELTA", 0.35)
+            size_mult *= _env_float("CEX_DEX_ADAPTIVE_RESCUE_LOW_SCORE_SIZE_MULT", 0.75)
+        elif score > 0.7:
+            min_net_delta += _env_float("CEX_DEX_ADAPTIVE_RESCUE_HIGH_SCORE_MIN_NET_DELTA", -0.20)
+            size_mult *= _env_float("CEX_DEX_ADAPTIVE_RESCUE_HIGH_SCORE_SIZE_MULT", 1.05)
+
+        if drift_ema >= _env_float("CEX_DEX_ADAPTIVE_RESCUE_HIGH_DRIFT_BPS", 16.0):
+            min_net_delta += _env_float("CEX_DEX_ADAPTIVE_RESCUE_HIGH_DRIFT_MIN_NET_DELTA", 0.25)
+            size_mult *= _env_float("CEX_DEX_ADAPTIVE_RESCUE_HIGH_DRIFT_SIZE_MULT", 0.85)
+
+        return {
+            "min_net_delta_bps": float(min_net_delta),
+            "size_mult": max(0.25, min(1.5, float(size_mult))),
+        }
 
     def _trade_min_micro(self) -> int:
         """Resolve minimum trade floor with direct CEX-DEX override when set."""
@@ -1493,7 +1655,10 @@ class CexDexStrategy:
                 and not self.settings.test_mode
                 and not self.settings.simulate
             ):
-                rescue_min_net = _soft_rescue_min_sim_net_bps()
+                adaptive_rescue = self._pair_adaptive_rescue_profile(pair.pair_label)
+                rescue_min_net = _soft_rescue_min_sim_net_bps() + float(
+                    adaptive_rescue.get("min_net_delta_bps") or 0.0
+                )
                 rescue_negative_guardrails = _soft_rescue_negative_sim_guardrails(pair.symbol)
                 rescue_sizes: list[int] = []
                 max_trade = self._max_trade_usdc_micro(pair.symbol)
@@ -1503,6 +1668,15 @@ class CexDexStrategy:
                 )
                 rescue_min_trade_micro = max(1, min(max_trade, rescue_min_trade_micro))
                 start_size = max(rescue_min_trade_micro, min(max_trade, int(size_usdc)))
+                start_size = int(
+                    max(
+                        rescue_min_trade_micro,
+                        min(
+                            max_trade,
+                            int(start_size * float(adaptive_rescue.get("size_mult") or 1.0)),
+                        ),
+                    )
+                )
                 for mult in _soft_rescue_size_ladder():
                     candidate = int(start_size * mult)
                     clamped = max(rescue_min_trade_micro, min(max_trade, candidate))
