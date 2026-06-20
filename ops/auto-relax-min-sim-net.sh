@@ -62,7 +62,8 @@ echo "Watching funnel for ${WINDOW_SEC}s..."
 pass_count=0
 opp_count=0
 exec_count=0
-fill_count=0
+rescue_fill_count=0
+reverse_fill_count=0
 deep_neg_count=0
 best_net="-9999"
 
@@ -79,7 +80,11 @@ while IFS= read -r line; do
     ((exec_count+=1))
   fi
   if [[ "$line" == *"LIVE FILL"* ]]; then
-    ((fill_count+=1))
+    if [[ "$line" == *"path=dex_cex_reverse"* ]]; then
+      ((reverse_fill_count+=1))
+    else
+      ((rescue_fill_count+=1))
+    fi
   fi
 
   if [[ "$line" == *"ROUNDTRIP_PRE_SIM reject"* ]]; then
@@ -100,13 +105,14 @@ echo "== Auto relax summary =="
 echo "pass_count:     $pass_count"
 echo "opportunity:    $opp_count"
 echo "executing:      $exec_count"
-echo "live_fill:      $fill_count"
+echo "rescue_fill:    $rescue_fill_count"
+echo "reverse_fill:   $reverse_fill_count"
 echo "deep_neg_count: $deep_neg_count"
 echo "best_sim_net:   ${best_net}bps"
 
 # Strict policy: keep relaxed only if there is strong evidence the funnel improved.
 keep_relaxed=0
-if (( fill_count > 0 )); then
+if (( rescue_fill_count > 0 )); then
   keep_relaxed=1
 elif (( pass_count > 0 && opp_count > 0 )); then
   keep_relaxed=1
