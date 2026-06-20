@@ -2102,12 +2102,17 @@ class CexDexStrategy:
     ) -> bool:
         """CEX market buy → withdraw SOL to wallet → Jupiter/Jito sell."""
         bp_symbol = str(opp.get("backpack_symbol") or "SOL_USDC")
+        base_symbol = str(opp.get("symbol") or "SOL").strip().upper()
+        base_mint = str(opp.get("base_mint") or SOL_MINT)
+        base_decimals = int(opp.get("base_decimals") or 9)
+        is_sol_base = base_symbol == "SOL" or base_mint == SOL_MINT
         logger.info(
-            "FULL CEX-DEX SOL | buying $%.2f USDC on Backpack",
+            "FULL CEX-DEX %s | buying $%.2f USDC on Backpack",
+            base_symbol,
             size_micro / 1e6,
         )
 
-        sol_before = await get_ledger_sol_balance()
+        sol_before = await get_ledger_sol_balance() if is_sol_base else 0.0
         withdraw_ref = await self.backpack.execute_cex_buy_then_withdraw(
             size_micro,
             pair=bp_symbol,
@@ -2117,32 +2122,46 @@ class CexDexStrategy:
             logger.error("CEX buy or SOL withdraw failed")
             return False
 
-        logger.info("SOL withdrawn to wallet | ref=%s", withdraw_ref)
+        logger.info("%s withdrawn to wallet | ref=%s", base_symbol, withdraw_ref)
 
-        sol_after = await get_ledger_sol_balance()
-        reserve_sol = float(os.getenv("CEX_DEX_SOL_SELL_RESERVE_SOL", "0.02"))
-        delta_sol = max(0.0, sol_after - sol_before)
-        sell_sol = max(0.0, delta_sol - reserve_sol)
-        if sell_sol <= 0:
+        if is_sol_base:
+            sol_after = await get_ledger_sol_balance()
+            reserve_sol = float(os.getenv("CEX_DEX_SOL_SELL_RESERVE_SOL", "0.02"))
+            delta_sol = max(0.0, sol_after - sol_before)
+            sell_base = max(0.0, delta_sol - reserve_sol)
+        else:
+            sol_after = sol_before
+            sell_base = 0.0
+
+        if sell_base <= 0:
             fudge = float(os.getenv("CEX_DEX_CEX_BUY_FILL_FUDGE", "0.995"))
-            sell_sol = (size_micro / 1e6) / max(cex_px, 1e-9) * fudge
-            sell_sol = min(sell_sol, max(0.0, sol_after - reserve_sol))
+            sell_base = (size_micro / 1e6) / max(cex_px, 1e-9) * fudge
+            if is_sol_base:
+                sell_base = min(
+                    sell_base,
+                    max(
+                        0.0,
+                        sol_after - float(os.getenv("CEX_DEX_SOL_SELL_RESERVE_SOL", "0.02")),
+                    ),
+                )
 
-        base_raw = int(sell_sol * 1_000_000_000)
+        base_raw = int(sell_base * (10**base_decimals))
         if base_raw < 1:
             logger.error(
-                "No on-chain SOL to sell after withdraw | before=%.4f after=%.4f",
-                sol_before,
-                sol_after,
+                "No on-chain %s to sell after withdraw | before=%.4f after=%.4f",
+                base_symbol,
+                sol_before if is_sol_base else 0.0,
+                sol_after if is_sol_base else 0.0,
             )
             return False
 
         opp["_chain_sell_lamports"] = base_raw
         opp["_execution_path"] = "cex_withdraw"
         logger.info(
-            "Jupiter sell sizing | lamports=%s (~%.4f SOL)",
+            "Jupiter sell sizing | raw=%s (~%.4f %s)",
             base_raw,
-            sell_sol,
+            sell_base,
+            base_symbol,
         )
         return await self._execute_jupiter_sell_with_retries(
             size_micro,
@@ -2283,6 +2302,7 @@ class CexDexStrategy:
             sim_ok, sim_net, sim_reason, sim_details = await roundtrip.run_roundtrip(
                 cex_px,
                 size_micro,
+                backpack_symbol=bp_symbol,
                 base_mint=str(opp.get("base_mint") or SOL_MINT),
                 base_decimals=int(opp.get("base_decimals") or 9),
                 expected_net_bps=float(opp.get("net_bps") or 0),
@@ -2330,9 +2350,9 @@ class CexDexStrategy:
             record_trade_execution("cex_dex", success=False, pnl_usd=0.0)
             return False
 
-        if base_symbol != "SOL":
-            logger.warning("BLOCKED: midcap unsupported for live CEX→withdraw→DEX | %s", pair_label)
-            self._log_blocked_attempt(opp, "midcap_unsupported")
+        if base_symbol != "SOL" and not _env_bool("CEX_DEX_ENABLE_MIDCAP_LIVE", True):
+            logger.warning("BLOCKED: midcap live disabled by env | %s", pair_label)
+            self._log_blocked_attempt(opp, "midcap_live_disabled")
             record_trade_execution("cex_dex", success=False, pnl_usd=0.0)
             return False
 

@@ -96,6 +96,7 @@ class RoundtripSimulator:
         cex_buy_price: float,
         size_usdc_micro: int,
         *,
+        backpack_symbol: str = "SOL_USDC",
         base_mint: str = SOL_MINT,
         base_decimals: int = 9,
         expected_net_bps: float | None = None,
@@ -131,13 +132,15 @@ class RoundtripSimulator:
                 from src.cex.backpack_ticker import cex_buy_walk_ask_impact_bps
 
                 levels = int(os.getenv("CEX_DEX_ROUNDTRIP_DEPTH_LEVELS", "5"))
-                book = await get_backpack_client().get_orderbook("SOL_USDC", limit=levels)
+                market = str(backpack_symbol or "SOL_USDC")
+                book = await get_backpack_client().get_orderbook(market, limit=levels)
                 impact_bps, eff_price, ok = cex_buy_walk_ask_impact_bps(
                     book, usdc, max_levels=levels
                 )
                 depth_meta = {
                     "cex_depth_impact_bps": round(impact_bps, 2),
                     "cex_effective_ask": round(eff_price, 6),
+                    "cex_depth_market": market,
                 }
                 if ok:
                     eff_cex = eff_price
@@ -180,7 +183,7 @@ class RoundtripSimulator:
             self.jupiter,
             size_usdc_micro,
             cex_buy_price,
-            backpack_symbol=str(opportunity.get("backpack_symbol") or "SOL_USDC"),
+            backpack_symbol=str(backpack_symbol or "SOL_USDC"),
             base_mint=base_mint,
             base_decimals=base_decimals,
             expected_net_bps=expected_net_bps,
