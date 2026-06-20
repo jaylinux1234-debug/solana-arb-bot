@@ -343,6 +343,7 @@ class CexDexStrategy:
         self._pairs = self._load_tradeable_pairs()
         self._scan_priority_symbol: str | None = None
         self._pair_roundtrip_fail_state: dict[str, dict[str, float | int]] = {}
+        self._pair_quality_state: dict[str, dict[str, float | int]] = {}
         logger.info(
             "CEX-DEX pairs | count=%d proven_midcaps=%s symbols=%s",
             len(self._pairs),
@@ -1132,15 +1133,26 @@ class CexDexStrategy:
                 if opp is not None:
                     candidates.append(opp)
 
+        best_rank = float("-inf")
+        score_weight_bps = _env_float("CEX_DEX_PAIR_SCORE_WEIGHT_BPS", 6.0)
         for opp in candidates:
-            if best is None or float(opp["net_bps"]) > float(best["net_bps"]):
+            pair_label = str(opp.get("pair_label") or "SOL/USDC")
+            fill_score = self._pair_fill_score(pair_label)
+            bonus_bps = (fill_score - 0.5) * score_weight_bps
+            opp["pair_fill_score"] = fill_score
+            opp["pair_fill_bonus_bps"] = bonus_bps
+            rank_bps = float(opp["net_bps"]) + bonus_bps
+            if best is None or rank_bps > best_rank:
                 best = opp
+                best_rank = rank_bps
         if best:
             logger.info(
-                "OPPORTUNITY | pair=%s edge=%.1fbps net=%.1fbps size=$%.2f conf=%.1f%%",
+                "OPPORTUNITY | pair=%s edge=%.1fbps net=%.1fbps rank=%.1fbps score=%.2f size=$%.2f conf=%.1f%%",
                 best.get("pair_label"),
                 best.get("edge_bps"),
                 best.get("net_bps"),
+                best_rank,
+                float(best.get("pair_fill_score") or 0.5),
                 int(best["size_usdc"]) / 1e6,
                 best.get("confidence"),
             )
@@ -1801,6 +1813,15 @@ class CexDexStrategy:
             confidence,
             gross_bps=edge_bps,
         )
+        detect_route_hops = quote_route_hops(probe_quote) if isinstance(probe_quote, dict) else 0
+        detect_price_impact_bps = None
+        if isinstance(probe_quote, dict):
+            try:
+                pct = probe_quote.get("priceImpactPct")
+                if pct is not None:
+                    detect_price_impact_bps = abs(float(pct)) * 10_000.0
+            except (TypeError, ValueError):
+                detect_price_impact_bps = None
         rescue_quote_return_bps = None
         if chosen_sim_details:
             in_micro = int(chosen_sim_details.get("usdc_in_micro") or 0)
@@ -1828,6 +1849,8 @@ class CexDexStrategy:
             "jup_price": jup_price,
             "dex_venue": dex_venue,
             "jup_probe_quote": probe_quote,
+            "detect_route_hops": int(detect_route_hops),
+            "detect_price_impact_bps": detect_price_impact_bps,
             "gate_mode": gates.get("mode", "strict"),
             "dynamic_gates": gates,
             "rescue_negative_sim": bool(rescue_negative_sim),
@@ -2015,6 +2038,33 @@ class CexDexStrategy:
             "backpack_usdc": backpack_usdc,
         }
 
+    async def _check_cex_stability(self, backpack_symbol: str) -> tuple[bool, float, str]:
+        if not _env_bool("CEX_DEX_EXEC_CEX_STABILITY_ENABLED", True):
+            cex_buy, _, _ = await self.backpack.get_cex_buy_reference_price(backpack_symbol)
+            return bool(cex_buy and cex_buy > 0), float(cex_buy or 0.0), "disabled"
+
+        snaps = max(2, _env_int("CEX_DEX_EXEC_CEX_STABILITY_SNAPSHOTS", 3))
+        gap_ms = max(50, _env_int("CEX_DEX_EXEC_CEX_STABILITY_GAP_MS", 150))
+        drift_cap = max(0.5, _env_float("CEX_DEX_EXEC_CEX_STABILITY_MAX_DRIFT_BPS", 4.0))
+        prices: list[float] = []
+
+        for i in range(snaps):
+            cex_buy, _, _ = await self.backpack.get_cex_buy_reference_price(backpack_symbol)
+            px = float(cex_buy or 0.0)
+            if px <= 0:
+                return False, 0.0, "cex_price_unavailable"
+            prices.append(px)
+            if i + 1 < snaps:
+                await asyncio.sleep(gap_ms / 1000.0)
+
+        px_min = min(prices)
+        px_max = max(prices)
+        px_mid = prices[-1]
+        drift_bps = ((px_max - px_min) / px_mid) * 10_000.0 if px_mid > 0 else 9999.0
+        if drift_bps > drift_cap:
+            return False, px_mid, f"cex_unstable_{drift_bps:.2f}bps"
+        return True, px_mid, "stable"
+
     def _log_inventory_shift(
         self,
         pair_label: str,
@@ -2031,6 +2081,68 @@ class CexDexStrategy:
             float(after.get("wallet_sol", 0.0) - before.get("wallet_sol", 0.0)),
             float(after.get("backpack_usdc", 0.0) - before.get("backpack_usdc", 0.0)),
         )
+
+    def _pair_quality_snapshot(self, pair_label: str) -> dict[str, float | int]:
+        label = (pair_label or "UNKNOWN").strip().upper() or "UNKNOWN"
+        return dict(
+            self._pair_quality_state.get(
+                label,
+                {
+                    "attempts": 0,
+                    "fills": 0,
+                    "roundtrip_blocks": 0,
+                    "drift_ema_abs": 0.0,
+                },
+            )
+        )
+
+    def _pair_quality_record_attempt(self, pair_label: str) -> None:
+        label = (pair_label or "UNKNOWN").strip().upper() or "UNKNOWN"
+        state = self._pair_quality_snapshot(label)
+        state["attempts"] = int(state.get("attempts") or 0) + 1
+        self._pair_quality_state[label] = state
+
+    def _pair_quality_record_fill(self, pair_label: str) -> None:
+        label = (pair_label or "UNKNOWN").strip().upper() or "UNKNOWN"
+        state = self._pair_quality_snapshot(label)
+        state["fills"] = int(state.get("fills") or 0) + 1
+        self._pair_quality_state[label] = state
+
+    def _pair_quality_record_roundtrip_block(
+        self,
+        pair_label: str,
+        *,
+        rescue_sim_bps: float | None,
+        exec_sim_bps: float,
+    ) -> None:
+        label = (pair_label or "UNKNOWN").strip().upper() or "UNKNOWN"
+        state = self._pair_quality_snapshot(label)
+        state["roundtrip_blocks"] = int(state.get("roundtrip_blocks") or 0) + 1
+        drift_abs = 0.0
+        if rescue_sim_bps is not None:
+            drift_abs = abs(float(rescue_sim_bps) - float(exec_sim_bps))
+        alpha = max(0.05, min(1.0, _env_float("CEX_DEX_PAIR_QUALITY_DRIFT_ALPHA", 0.25)))
+        prev = float(state.get("drift_ema_abs") or 0.0)
+        state["drift_ema_abs"] = (alpha * drift_abs) + ((1.0 - alpha) * prev)
+        self._pair_quality_state[label] = state
+
+    def _pair_fill_score(self, pair_label: str) -> float:
+        state = self._pair_quality_snapshot(pair_label)
+        attempts = int(state.get("attempts") or 0)
+        fills = int(state.get("fills") or 0)
+        blocks = int(state.get("roundtrip_blocks") or 0)
+        drift_ema = float(state.get("drift_ema_abs") or 0.0)
+
+        min_samples = max(1, _env_int("CEX_DEX_PAIR_SCORE_MIN_SAMPLES", 5))
+        if attempts < min_samples:
+            return 0.5
+
+        fill_rate = max(0.0, min(1.0, fills / max(1, attempts)))
+        block_rate = max(0.0, min(1.0, blocks / max(1, attempts)))
+        drift_norm = max(0.0, min(1.0, drift_ema / max(1.0, _env_float("CEX_DEX_PAIR_SCORE_DRIFT_CAP_BPS", 40.0))))
+
+        score = (0.5 * fill_rate) + (0.3 * (1.0 - block_rate)) + (0.2 * (1.0 - drift_norm))
+        return max(0.0, min(1.0, score))
 
     def _record_win_rate_outcome(
         self,
@@ -2267,6 +2379,22 @@ class CexDexStrategy:
     async def execute_trade(self, opp: dict[str, Any]) -> bool:
         """Execute full CEX-DEX leg: CEX buy → Jupiter swap → Jito bundle."""
         size_micro = int(opp["size_usdc"])
+        original_size_micro = int(size_micro)
+        stage1_frac = _env_float("CEX_DEX_EXEC_STAGE1_FRACTION", 1.0)
+        if 0.0 < stage1_frac < 1.0 and size_micro > self._trade_min_micro():
+            staged_size = max(self._trade_min_micro(), int(size_micro * stage1_frac))
+            if staged_size < size_micro:
+                size_micro = int(staged_size)
+                opp["size_usdc"] = int(staged_size)
+                opp["size_usdc_micro"] = int(staged_size)
+                opp["_staged_original_size_usdc_micro"] = int(original_size_micro)
+                logger.info(
+                    "EXEC_STAGE1 | pair=%s staged_usdc=%.2f original_usdc=%.2f fraction=%.2f",
+                    str(opp.get("pair_label") or "SOL/USDC"),
+                    staged_size / 1_000_000.0,
+                    original_size_micro / 1_000_000.0,
+                    stage1_frac,
+                )
         if not self.risk.can_trade(size_micro):
             return False
         is_negative_tier = bool(opp.get("rescue_negative_sim") is True)
@@ -2320,6 +2448,8 @@ class CexDexStrategy:
                 record_trade_execution("cex_dex", success=True, pnl_usd=profit_usdc)
             return True
 
+            self._pair_quality_record_attempt(pair_label)
+
         if not self.win_rate_tracker.should_approve(min_win_rate=LIVE_MIN_WIN_RATE):
             logger.info("Win rate below threshold - skipping")
             record_trade_execution("cex_dex", success=False, pnl_usd=0.0)
@@ -2347,10 +2477,15 @@ class CexDexStrategy:
             wr_reason,
         )
 
-        cex_buy, _cex_mid, cex_ask = await self.backpack.get_cex_buy_reference_price(
-            bp_symbol
-        )
-        cex_px = float(cex_buy or opp.get("cex_price") or 0.0)
+        stable_ok, stable_px, stable_reason = await self._check_cex_stability(bp_symbol)
+        if not stable_ok:
+            logger.warning("BLOCKED: CEX stability | %s reason=%s", pair_label, stable_reason)
+            self._log_blocked_attempt(opp, f"cex_stability:{stable_reason}")
+            record_trade_execution("cex_dex", success=False, pnl_usd=0.0)
+            return False
+
+        _cex_buy, _cex_mid, cex_ask = await self.backpack.get_cex_buy_reference_price(bp_symbol)
+        cex_px = float(_cex_buy or stable_px or opp.get("cex_price") or 0.0)
         if cex_px > 0:
             opp["cex_price"] = cex_px
             opp["cex_ask"] = cex_ask
@@ -2419,6 +2554,12 @@ class CexDexStrategy:
             rescue_cex_eff = (
                 float(opp.get("rescue_cex_effective_buy_price"))
                 if opp.get("rescue_cex_effective_buy_price") is not None
+                else None
+            )
+            detect_hops = int(opp.get("detect_route_hops") or 0)
+            detect_impact = (
+                float(opp.get("detect_price_impact_bps"))
+                if opp.get("detect_price_impact_bps") is not None
                 else None
             )
 
@@ -2518,10 +2659,34 @@ class CexDexStrategy:
             if rescue_quote_return is not None and exec_quote_return is not None:
                 quote_drift_bps = float(exec_quote_return) - float(rescue_quote_return)
 
+            exec_hops = int(sim_details.get("route_hops") or 0)
+            exec_impact = (
+                float(sim_details.get("sell_price_impact_bps"))
+                if sim_details.get("sell_price_impact_bps") is not None
+                else None
+            )
+            hops_delta = abs(exec_hops - detect_hops) if detect_hops > 0 else 0
+            impact_delta = (
+                abs(float(exec_impact) - float(detect_impact))
+                if (exec_impact is not None and detect_impact is not None)
+                else 0.0
+            )
+            if _env_bool("CEX_DEX_EXEC_ROUTE_DRIFT_GUARD_ENABLED", True):
+                max_hops_delta = max(1, _env_int("CEX_DEX_EXEC_ROUTE_HOPS_MAX_DELTA", 2))
+                max_impact_delta = max(5.0, _env_float("CEX_DEX_EXEC_ROUTE_IMPACT_MAX_DELTA_BPS", 120.0))
+                if hops_delta > max_hops_delta and impact_delta > max_impact_delta:
+                    sim_ok = False
+                    sim_reason = f"route_drift_h{hops_delta}_i{impact_delta:.1f}"
+
             if not sim_ok:
                 self._pair_roundtrip_record_fail(pair_label, float(sim_net))
+                self._pair_quality_record_roundtrip_block(
+                    pair_label,
+                    rescue_sim_bps=rescue_sim,
+                    exec_sim_bps=float(sim_net),
+                )
                 logger.warning(
-                    "BLOCKED: roundtrip pre-sim | net=%.1fbps reason=%s hops=%s rescue_sim=%s delta=%s cex_drift=%s quote_drift=%s rescue_to_exec_ms=%s",
+                    "BLOCKED: roundtrip pre-sim | net=%.1fbps reason=%s hops=%s rescue_sim=%s delta=%s cex_drift=%s quote_drift=%s route_hops_delta=%s impact_delta=%s rescue_to_exec_ms=%s",
                     float(sim_net),
                     sim_reason,
                     sim_details.get("route_hops"),
@@ -2533,6 +2698,8 @@ class CexDexStrategy:
                     ),
                     "n/a" if cex_drift_bps is None else f"{cex_drift_bps:.2f}",
                     "n/a" if quote_drift_bps is None else f"{quote_drift_bps:.2f}",
+                    hops_delta,
+                    f"{impact_delta:.2f}" if impact_delta else "n/a",
                     "n/a" if rescue_exec_ms is None else f"{rescue_exec_ms:.0f}",
                 )
                 self._log_blocked_attempt(opp, f"roundtrip_sim:{sim_reason}")
@@ -2680,6 +2847,7 @@ class CexDexStrategy:
                 pnl_usd=profit_usdc,
                 slippage_bps=slippage_logged,
             )
+            self._pair_quality_record_fill(pair_label)
             self._record_win_rate_outcome(
                 opp, success=True, realized_usdc=profit_usdc, trade_id=trade_id
             )
