@@ -1141,6 +1141,7 @@ class CexDexStrategy:
 
         best_rank = float("-inf")
         score_weight_bps = _env_float("CEX_DEX_PAIR_SCORE_WEIGHT_BPS", 6.0)
+        ranked_candidates: list[tuple[float, dict[str, Any]]] = []
         for opp in candidates:
             pair_label = str(opp.get("pair_label") or "SOL/USDC")
             fill_score = self._pair_fill_score(pair_label)
@@ -1153,9 +1154,25 @@ class CexDexStrategy:
             opp["pair_fill_bonus_bps"] = bonus_bps
             opp["pair_route_bonus_bps"] = route_bonus_bps
             rank_bps = float(opp["net_bps"]) + bonus_bps + route_bonus_bps
+            ranked_candidates.append((rank_bps, opp))
             if best is None or rank_bps > best_rank:
                 best = opp
                 best_rank = rank_bps
+        ranked_candidates.sort(key=lambda item: item[0], reverse=True)
+        log_top_n = max(1, _env_int("CEX_DEX_OPPORTUNITY_LOG_TOP_N", 3))
+        for idx, (rank_bps, opp) in enumerate(ranked_candidates[:log_top_n], start=1):
+            logger.info(
+                "OPPORTUNITY_CANDIDATE | rank=%d pair=%s edge=%.1fbps net=%.1fbps score=%.2f route_bonus=%.1f size=$%.2f conf=%.1f%% rank_bps=%.1f",
+                idx,
+                opp.get("pair_label"),
+                opp.get("edge_bps"),
+                opp.get("net_bps"),
+                float(opp.get("pair_fill_score") or 0.5),
+                float(opp.get("pair_route_bonus_bps") or 0.0),
+                int(opp["size_usdc"]) / 1e6,
+                opp.get("confidence"),
+                rank_bps,
+            )
         if best:
             logger.info(
                 "OPPORTUNITY | pair=%s edge=%.1fbps net=%.1fbps rank=%.1fbps score=%.2f route_bonus=%.1f size=$%.2f conf=%.1f%%",
