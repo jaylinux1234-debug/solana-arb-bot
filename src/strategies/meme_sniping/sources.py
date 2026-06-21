@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -24,6 +25,8 @@ _pump_fail_streak = 0
 _last_pump_warn = 0.0
 _dex_pair_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL_SEC = 45.0
+_last_dex_fetch = 0.0
+_dex_min_interval_sec = float(os.getenv("MEME_SNIPING_DEX_MIN_INTERVAL_SEC", "1.5") or 1.5)
 
 
 def _pump_headers() -> dict[str, str]:
@@ -230,6 +233,11 @@ async def _fetch_dexscreener(client: httpx.AsyncClient, limit: int = 20) -> list
 
 async def fetch_candidate_coins(limit: int = 15) -> tuple[list[dict[str, Any]], str]:
     """Return normalized coin dicts and the source label used."""
+    global _last_dex_fetch
+    now = time.monotonic()
+    if now - _last_dex_fetch < _dex_min_interval_sec:
+        await asyncio.sleep(_dex_min_interval_sec - (now - _last_dex_fetch))
+
     proxy = (os.getenv("MEME_SNIPING_HTTP_PROXY") or os.getenv("HTTPS_PROXY") or "").strip()
     client_kwargs: dict[str, Any] = {"timeout": 8.0}
     if proxy:
@@ -241,4 +249,5 @@ async def fetch_candidate_coins(limit: int = 15) -> tuple[list[dict[str, Any]], 
             return pump[:limit], "pump.fun"
 
         dex = await _fetch_dexscreener(client, limit=max(limit, 20))
+        _last_dex_fetch = time.monotonic()
         return dex[:limit], "dexscreener"
