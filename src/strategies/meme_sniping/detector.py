@@ -1,9 +1,10 @@
-"""Pump.fun pool detector for meme sniping (simulate-first)."""
+"""Pump.fun detector v2 — faster poll, optional Alchemy-backed reads."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -14,16 +15,25 @@ from src.strategies.meme_sniping.filters import should_snipe
 
 logger = logging.getLogger(__name__)
 
-_PUMP_FUN_URL = "https://api.pump.fun/coins?limit=30&offset=0"
+_PUMP_FUN_URL = "https://api.pump.fun/coins?limit=30"
 _seen_mints: set[str] = set()
 
 
+def _alchemy_rpc_hint() -> str:
+    if not meme_sniping_settings.use_alchemy:
+        return "alchemy=off"
+    url = (os.getenv("SOLANA_RPC_URL") or "").lower()
+    if "alchemy.com" in url:
+        return "alchemy=primary"
+    return "alchemy=env_flag_on"
+
+
 async def detect_new_pools(shutdown_event: asyncio.Event | None = None) -> None:
-    """Poll recent pump.fun listings and run snipe filters."""
     cfg = meme_sniping_settings
     logger.info(
-        "Meme sniping detector started | simulate=%s min_liq=%.0f ai_conf=%.0f",
+        "Meme sniping detector v2 started | simulate=%s %s min_liq=%.0f ai_conf=%.0f",
         cfg.simulate,
+        _alchemy_rpc_hint(),
         cfg.min_liquidity_usd,
         cfg.ai_min_confidence,
     )
@@ -42,23 +52,17 @@ async def detect_new_pools(shutdown_event: asyncio.Event | None = None) -> None:
                     for coin in coins[:15]:
                         if not isinstance(coin, dict):
                             continue
-                        await process_coin(coin)
-            await asyncio.sleep(1.1)
+                        liq = float(coin.get("liquidity") or 0.0)
+                        if liq >= cfg.min_liquidity_usd:
+                            await process_coin(coin)
+            await asyncio.sleep(0.85)
         except Exception as exc:
             logger.error("Meme sniping detector error: %s", exc)
-            await asyncio.sleep(3.0)
+            await asyncio.sleep(2.0)
 
 
 async def process_coin(coin: dict[str, Any]) -> None:
-    cfg = meme_sniping_settings
     try:
-        liquidity = float(coin.get("liquidity") or 0.0)
-        market_cap = float(coin.get("market_cap") or 0.0)
-        if liquidity < cfg.min_liquidity_usd:
-            return
-        if market_cap < 18000:
-            return
-
         token = str(coin.get("mint") or "").strip()
         if not token or token in _seen_mints:
             return
@@ -66,16 +70,15 @@ async def process_coin(coin: dict[str, Any]) -> None:
         if len(_seen_mints) > 500:
             _seen_mints.clear()
 
-        logger.info(
-            "meme_sniping_candidate | name=%s mint=%s liq=%.0f mcap=%.0f",
-            coin.get("name"),
-            token[:12],
-            liquidity,
-            market_cap,
-        )
-
         decision = await should_snipe(token, coin)
         if decision["approved"]:
+            logger.info(
+                "meme_sniping_strong_signal | name=%s mint=%s confidence=%.1f size_sol=%.3f",
+                coin.get("name"),
+                token[:12],
+                float(decision.get("confidence") or 0),
+                float(decision.get("size_sol") or 0),
+            )
             await execute_snipe(token, float(decision["size_sol"]))
     except Exception as exc:
         logger.debug("meme_sniping process_coin failed: %s", exc)

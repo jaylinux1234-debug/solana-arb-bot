@@ -240,8 +240,9 @@ async def run() -> None:
             )
         )
         logger.info(
-            "Meme Sniping Strategy activated | simulate=%s max_trade_sol=%.2f",
+            "Meme Sniping Strategy v2 activated | simulate=%s alchemy=%s max_trade_sol=%.2f",
             meme_sniping_settings.simulate,
+            meme_sniping_settings.use_alchemy,
             meme_sniping_settings.max_trade_sol,
         )
 
