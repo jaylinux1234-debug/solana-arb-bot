@@ -170,6 +170,8 @@ async def _profile_to_coin(client: httpx.AsyncClient, profile: dict[str, Any]) -
     pair = await _fetch_dex_pair(client, mint)
     liq = float((pair or {}).get("liquidity", {}).get("usd") or 0)
     base = (pair or {}).get("baseToken") or {}
+    txns = (pair or {}).get("txns") or {}
+    labels = (pair or {}).get("labels") or []
     return {
         "mint": mint,
         "name": base.get("name") or str(profile.get("description") or "")[:40],
@@ -181,7 +183,10 @@ async def _profile_to_coin(client: httpx.AsyncClient, profile: dict[str, Any]) -
         "social_mentions": len(profile.get("links") or []),
         "volatility_bps": _volatility_bps(pair),
         "social_score": _social_score(profile, pair),
-        "txns_m5_buys": int(((pair or {}).get("txns") or {}).get("m5", {}).get("buys") or 0),
+        "txns_m5_buys": int((txns.get("m5") or {}).get("buys") or 0),
+        "txns_h24": txns.get("h24") or {},
+        "holder_proxy": int(((txns.get("h24") or {}).get("buys") or 0) * 3),
+        "pair_labels": labels,
         "source": "dexscreener",
     }
 

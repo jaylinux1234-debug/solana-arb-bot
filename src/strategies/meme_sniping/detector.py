@@ -54,14 +54,16 @@ def _prune_mint_cooldowns() -> None:
 async def detect_new_pools(shutdown_event: asyncio.Event | None = None) -> None:
     cfg = meme_sniping_settings
     logger.info(
-        "Meme sniping detector v2 started | simulate=%s %s min_liq=%.0f ai_conf=%.0f "
-        "mint_cooldown=%dm stop_grace=%ds source=pump.fun+dexscreener",
+        "Meme sniping detector v3 started | simulate=%s %s min_liq=%.0f ai_conf=%.0f "
+        "ensemble_min=%.0f mint_cooldown=%dm stop_grace=%ds trailing=%s",
         cfg.simulate,
         _alchemy_rpc_hint(),
         cfg.min_liquidity_usd,
         cfg.ai_min_confidence,
+        cfg.ensemble_min_score,
         cfg.mint_cooldown_minutes,
         cfg.stop_grace_sec,
+        cfg.enable_trailing_stop,
     )
 
     while True:
@@ -113,6 +115,8 @@ async def process_coin(coin: dict[str, Any]) -> None:
                 "vol_below_min",
                 "social_below_min",
                 "ai_rejected",
+                "validator_failed",
+                "blacklisted",
             )):
                 reason = "ai_rejected"
             meme_sniping_metrics.record_reject(reason)

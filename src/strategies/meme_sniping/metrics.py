@@ -1,4 +1,4 @@
-"""In-process sim metrics for meme sniping (hourly reports via logs)."""
+"""In-process sim metrics + trade log for meme sniping."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _REPORT_PATH = Path("logs/meme_sniping_sim.jsonl")
+_TRADES_PATH = Path("logs/meme_snipes.jsonl")
 
 
 @dataclass
@@ -27,9 +28,13 @@ class MemeSnipingMetrics:
     ai_approvals: int = 0
     sim_entries: int = 0
     sim_exits: dict[str, int] = field(default_factory=dict)
+    partial_exits: int = 0
     active_positions: int = 0
     last_source: str = ""
     last_signal: dict[str, Any] | None = None
+    trade_log: list[dict[str, Any]] = field(default_factory=list)
+    pnl_bps_samples: list[float] = field(default_factory=list)
+    largest_drawdown_bps: float = 0.0
 
     def record_scan(self, source: str, candidate_count: int) -> None:
         self.scans += 1
@@ -55,11 +60,89 @@ class MemeSnipingMetrics:
             "confidence": round(confidence, 1),
             "ts": datetime.now(UTC).isoformat(),
         }
+        self._append_trade(
+            {
+                "event": "entry",
+                "mint": mint,
+                "size_sol": size_sol,
+                "confidence": confidence,
+            }
+        )
 
-    def record_exit(self, reason: str) -> None:
+    def record_partial_exit(
+        self,
+        reason: str,
+        pnl_bps: float | None = None,
+        *,
+        fraction: float = 0.0,
+    ) -> None:
+        self.partial_exits += 1
+        key = reason.split("(")[0].strip() or reason
+        self.sim_exits[key] = self.sim_exits.get(key, 0) + 1
+        self._track_pnl(pnl_bps)
+        self._append_trade(
+            {
+                "event": "partial_exit",
+                "reason": reason,
+                "pnl_bps": pnl_bps,
+                "fraction": fraction,
+            }
+        )
+
+    def record_exit(
+        self,
+        reason: str,
+        *,
+        pnl_bps: float | None = None,
+        mint: str = "",
+    ) -> None:
         key = reason.split("(")[0].strip() or reason
         self.sim_exits[key] = self.sim_exits.get(key, 0) + 1
         self.active_positions = max(0, self.active_positions - 1)
+        self._track_pnl(pnl_bps)
+        self._append_trade(
+            {
+                "event": "exit",
+                "mint": mint,
+                "reason": reason,
+                "pnl_bps": pnl_bps,
+            }
+        )
+
+    def _track_pnl(self, pnl_bps: float | None) -> None:
+        if pnl_bps is None:
+            return
+        self.pnl_bps_samples.append(float(pnl_bps))
+        if pnl_bps < 0 and abs(pnl_bps) > self.largest_drawdown_bps:
+            self.largest_drawdown_bps = abs(pnl_bps)
+
+    def _append_trade(self, row: dict[str, Any]) -> None:
+        entry = {"ts": datetime.now(UTC).isoformat(), **row}
+        self.trade_log.append(entry)
+        try:
+            _TRADES_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with _TRADES_PATH.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, default=str) + "\n")
+        except OSError as exc:
+            logger.debug("meme_snipes.jsonl write failed: %s", exc)
+
+    def get_meme_stats(self) -> dict[str, Any]:
+        wins = sum(1 for x in self.pnl_bps_samples if x > 0)
+        total = len(self.pnl_bps_samples)
+        return {
+            "daily_pnl_bps_avg": round(
+                sum(self.pnl_bps_samples) / total if total else 0.0, 2
+            ),
+            "trades_today": self.sim_entries,
+            "exits_today": total,
+            "win_rate_pct": round((wins / total * 100.0) if total else 0.0, 1),
+            "active_positions": self.active_positions,
+            "largest_drawdown_bps": round(self.largest_drawdown_bps, 1),
+            "partial_exits": self.partial_exits,
+            "approval_rate_pct": round(
+                (self.ai_approvals / self.ai_reviews * 100.0) if self.ai_reviews else 0.0, 1
+            ),
+        }
 
     def snapshot(self) -> dict[str, Any]:
         elapsed_min = round((time.time() - self.started_at) / 60.0, 1)
@@ -77,8 +160,10 @@ class MemeSnipingMetrics:
             ),
             "sim_entries": self.sim_entries,
             "sim_exits": dict(self.sim_exits),
+            "partial_exits": self.partial_exits,
             "active_positions": self.active_positions,
             "last_signal": self.last_signal,
+            **self.get_meme_stats(),
         }
 
     def log_summary_if_due(self, interval_sec: float = 300.0) -> None:
@@ -98,3 +183,8 @@ class MemeSnipingMetrics:
 
 
 meme_sniping_metrics = MemeSnipingMetrics()
+
+
+def get_meme_stats() -> dict[str, Any]:
+    """Dashboard-friendly stats for health endpoints / daily funnel."""
+    return meme_sniping_metrics.get_meme_stats()

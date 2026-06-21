@@ -12,6 +12,7 @@ from typing import Any
 
 from src.strategies.meme_sniping.config import meme_sniping_settings
 from src.strategies.meme_sniping.metrics import meme_sniping_metrics
+from src.strategies.meme_sniping.position import next_tp_index, should_trailing_stop
 from src.strategies.meme_sniping.sources import fetch_token_mark_price_usd
 
 logger = logging.getLogger(__name__)
@@ -150,16 +151,16 @@ async def execute_snipe(token_mint: str, size_sol: float) -> None:
     entry_price_usd = await fetch_token_mark_price_usd(token_mint)
 
     if cfg.simulate:
+        levels = cfg.tp_levels_bps
         logger.info(
-            "[SIM] meme_snipe v2 | mint=%s size_sol=%.3f tp1=%d tp2=%d tp3=%d stop=%d "
-            "grace=%ds token_amt=%s entry_usd=%s",
+            "[SIM] meme_snipe v3 | mint=%s size_sol=%.3f tp_levels=%s stop=%d "
+            "grace=%ds trailing=%s token_amt=%s entry_usd=%s",
             token_mint,
             size_sol,
-            cfg.profit_target_1_bps,
-            cfg.profit_target_2_bps,
-            cfg.profit_target_3_bps,
+            levels,
             cfg.max_loss_bps,
             cfg.stop_grace_sec,
+            cfg.enable_trailing_stop,
             token_amount or "n/a",
             f"{entry_price_usd:.8f}" if entry_price_usd else "n/a",
         )
@@ -191,6 +192,15 @@ async def execute_snipe(token_mint: str, size_sol: float) -> None:
             return
 
         signer = HotWalletSigner.get_keypair()
+        tip_est = int(
+            float(getattr(settings, "JITO_TIP_LAMPORTS", 50_000) or 50_000) * cfg.jito_tip_mult
+        )
+        logger.info(
+            "meme_snipe live buy | mint=%s size_sol=%.3f jito_tip_est=%d",
+            token_mint[:12],
+            size_sol,
+            tip_est,
+        )
         ok = await jup.swap(quote, signer)
         if not ok:
             logger.warning("meme_snipe swap failed | mint=%s", token_mint)
@@ -203,7 +213,7 @@ async def execute_snipe(token_mint: str, size_sol: float) -> None:
             simulated=False,
             entry_price_usd=entry_price_usd,
         )
-        logger.info("meme_snipe executed v2 | mint=%s size_sol=%.3f", token_mint, size_sol)
+        logger.info("meme_snipe executed v3 | mint=%s size_sol=%.3f", token_mint, size_sol)
         asyncio.create_task(monitor_position(token_mint))
     except Exception as exc:
         logger.error("meme_snipe execute failed | mint=%s err=%s", token_mint, exc)
@@ -226,6 +236,8 @@ def _new_position(
         "peak_price": None,
         "pnl_samples": [],
         "stop_breach_count": 0,
+        "tp_hits": 0,
+        "peak_pnl_bps": 0.0,
     }
 
 
@@ -234,20 +246,31 @@ async def process_pnl_bps_update(
     raw_pnl_bps: float,
     position: dict[str, Any],
 ) -> bool:
-    """Apply TP ladder / stop (with grace+confirm) / time exit."""
+    """Apply partial TP ladder, trailing stop, hard stop, and time exit."""
     cfg = meme_sniping_settings
     pnl_bps = _smooth_pnl_bps(position, raw_pnl_bps)
     age_sec = _position_age_sec(position)
 
-    if pnl_bps >= cfg.profit_target_3_bps:
-        await sell_position(token_mint, f"TP3 (+{cfg.profit_target_3_bps}bps)", pnl_bps)
+    if should_trailing_stop(position, pnl_bps):
+        await sell_position(token_mint, "trailing_stop", pnl_bps)
         return True
-    if pnl_bps >= cfg.profit_target_2_bps:
-        await sell_position(token_mint, f"TP2 (+{cfg.profit_target_2_bps}bps)", pnl_bps)
-        return True
-    if pnl_bps >= cfg.profit_target_1_bps:
-        await sell_position(token_mint, f"TP1 (+{cfg.profit_target_1_bps}bps)", pnl_bps)
-        return True
+
+    levels = cfg.tp_levels_bps
+    fractions = cfg.tp_partial_fractions
+    tp_idx = next_tp_index(position)
+
+    for i in range(tp_idx, len(levels)):
+        level = levels[i]
+        if pnl_bps < level:
+            break
+        frac = fractions[i] if i < len(fractions) else 1.0
+        is_last = i == len(levels) - 1
+        if is_last or frac >= 0.99:
+            await sell_position(token_mint, f"TP{i + 1} (+{level}bps)", pnl_bps)
+            return True
+        await partial_sell(token_mint, frac, f"TP{i + 1} partial (+{level}bps)", pnl_bps)
+        position["tp_hits"] = i + 1
+        return False
 
     if pnl_bps <= cfg.max_loss_bps:
         if age_sec < cfg.stop_grace_sec:
@@ -403,9 +426,14 @@ async def fallback_monitor(token_mint: str) -> None:
             await asyncio.sleep(cfg.poll_interval_sec + 1)
 
 
-async def _execute_live_sell(token_mint: str, position: dict[str, Any]) -> bool:
-    token_amount = int(position.get("token_amount") or 0)
-    if token_amount <= 0:
+async def _execute_live_sell(
+    token_mint: str,
+    position: dict[str, Any],
+    *,
+    token_amount: int | None = None,
+) -> bool:
+    amount = int(token_amount or position.get("token_amount") or 0)
+    if amount <= 0:
         logger.warning("meme_snipe sell skipped | mint=%s no token_amount", token_mint[:12])
         return False
 
@@ -419,7 +447,7 @@ async def _execute_live_sell(token_mint: str, position: dict[str, Any]) -> bool:
         quote = await jup.get_quote_for_mints(
             input_mint=token_mint,
             output_mint=str(jup.SOL),
-            amount=token_amount,
+            amount=amount,
             slippage_bps=120,
         )
         if not quote:
@@ -429,11 +457,48 @@ async def _execute_live_sell(token_mint: str, position: dict[str, Any]) -> bool:
         signer = HotWalletSigner.get_keypair()
         ok = await jup.swap(quote, signer)
         if ok:
-            logger.info("meme_snipe sell executed | mint=%s amount=%d", token_mint[:12], token_amount)
+            logger.info("meme_snipe sell executed | mint=%s amount=%d", token_mint[:12], amount)
         return ok
     except Exception as exc:
         logger.error("meme_snipe sell failed | mint=%s err=%s", token_mint[:12], exc)
         return False
+
+
+async def partial_sell(
+    token_mint: str,
+    fraction: float,
+    reason: str,
+    pnl_bps: float | None,
+) -> None:
+    """Sell a fraction of the position; keep monitoring the remainder."""
+    cfg = meme_sniping_settings
+    position = active_positions.get(token_mint)
+    if not position:
+        return
+
+    frac = max(0.05, min(1.0, float(fraction)))
+    token_amount = int(position.get("token_amount") or 0)
+    sell_amt = max(1, int(token_amount * frac))
+    if sell_amt >= token_amount:
+        await sell_position(token_mint, reason, pnl_bps)
+        return
+
+    position["token_amount"] = token_amount - sell_amt
+    position["size_sol"] = float(position.get("size_sol") or 0) * (1.0 - frac)
+    meme_sniping_metrics.record_partial_exit(reason, pnl_bps, fraction=frac)
+
+    if cfg.simulate or position.get("simulated"):
+        logger.info(
+            "[SIM] meme_snipe partial sell | mint=%s frac=%.0f%% reason=%s pnl_bps=%s remaining_amt=%d",
+            token_mint,
+            frac * 100,
+            reason,
+            f"{pnl_bps:.1f}" if pnl_bps is not None else "n/a",
+            position["token_amount"],
+        )
+        return
+
+    await _execute_live_sell(token_mint, position, token_amount=sell_amt)
 
 
 async def sell_position(token_mint: str, reason: str, pnl_bps: float | None = None) -> None:
@@ -441,7 +506,7 @@ async def sell_position(token_mint: str, reason: str, pnl_bps: float | None = No
     cfg = meme_sniping_settings
     position = active_positions.pop(token_mint, None)
     sim = bool(position and position.get("simulated"))
-    meme_sniping_metrics.record_exit(reason)
+    meme_sniping_metrics.record_exit(reason, pnl_bps=pnl_bps, mint=token_mint)
 
     if pnl_bps is not None and pnl_bps < 0 and position:
         size_sol = float(position.get("size_sol") or 0)
