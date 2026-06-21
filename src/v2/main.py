@@ -231,6 +231,18 @@ async def run() -> None:
     ]
 
     from src.strategies.meme_sniping import meme_sniping_settings, detect_new_pools
+    from src.strategies.meme_lanes_config import (
+        get_filter_discovery_settings,
+        get_hybrid_mev_settings,
+        get_migration_sniper_settings,
+        get_smart_money_settings,
+    )
+    from src.strategies.filter_discovery import discovery_loop
+    from src.strategies.hybrid_mev_meme import hybrid_mev_watch_loop
+    from src.strategies.migration_sniper import migration_sniper_loop
+    from src.strategies.smart_money_copy import smart_money_copy_loop
+
+    meme_lane_names: list[str] = []
 
     if meme_sniping_settings.enabled:
         tasks.append(
@@ -239,21 +251,46 @@ async def run() -> None:
                 name="meme_sniping",
             )
         )
+        meme_lane_names.append("meme_sniping")
         logger.info(
-            "Meme Sniping Strategy v2 activated | simulate=%s alchemy=%s max_trade_sol=%.2f",
+            "Meme Sniping Strategy v3 activated | simulate=%s alchemy=%s max_trade_sol=%.2f",
             meme_sniping_settings.simulate,
             meme_sniping_settings.use_alchemy,
             meme_sniping_settings.max_trade_sol,
         )
+
+    sm_cfg = get_smart_money_settings()
+    if sm_cfg.enabled:
+        tasks.append(asyncio.create_task(smart_money_copy_loop(shutdown_event), name="smart_money_copy"))
+        meme_lane_names.append("smart_money_copy")
+        logger.info("Smart money copy lane enabled | simulate=%s", sm_cfg.simulate)
+
+    mig_cfg = get_migration_sniper_settings()
+    if mig_cfg.enabled:
+        tasks.append(asyncio.create_task(migration_sniper_loop(shutdown_event), name="migration_sniper"))
+        meme_lane_names.append("migration_sniper")
+        logger.info("Migration sniper lane enabled | simulate=%s", mig_cfg.simulate)
+
+    fd_cfg = get_filter_discovery_settings()
+    if fd_cfg.enabled:
+        tasks.append(asyncio.create_task(discovery_loop(shutdown_event), name="filter_discovery"))
+        meme_lane_names.append("filter_discovery")
+        logger.info("Filter discovery lane enabled | simulate=%s", fd_cfg.simulate)
+
+    hm_cfg = get_hybrid_mev_settings()
+    if hm_cfg.enabled:
+        tasks.append(asyncio.create_task(hybrid_mev_watch_loop(shutdown_event), name="hybrid_mev_meme"))
+        meme_lane_names.append("hybrid_mev_meme")
+        logger.info("Hybrid MEV meme lane enabled | simulate=%s", hm_cfg.simulate)
 
     if webhook_task is not None:
         tasks.append(webhook_task)
 
     try:
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        task_names = ["v2_cycle", "mev_router"] + (
-            ["meme_sniping"] if meme_sniping_settings.enabled else []
-        ) + (["helius_webhook"] if webhook_task is not None else [])
+        task_names = ["v2_cycle", "mev_router"] + meme_lane_names + (
+            ["helius_webhook"] if webhook_task is not None else []
+        )
         for name, result in zip(task_names, results, strict=True):
             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                 logger.error("Task %s failed: %s", name, result, exc_info=result)
