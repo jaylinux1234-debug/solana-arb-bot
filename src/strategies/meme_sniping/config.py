@@ -17,6 +17,7 @@ class MemeSnipingSettings(BaseSettings):
 
     enabled: bool = Field(default=True, validation_alias="ENABLE_MEME_SNIPING")
     use_alchemy: bool = Field(default=True, validation_alias="MEME_SNIPING_USE_ALCHEMY")
+    use_dex_price: bool = Field(default=True, validation_alias="MEME_SNIPING_USE_DEX_PRICE")
 
     min_liquidity_usd: float = Field(
         default=10000.0, validation_alias="MEME_SNIPING_MIN_LIQUIDITY_USD"
@@ -42,6 +43,17 @@ class MemeSnipingSettings(BaseSettings):
     )
     max_hold_minutes: int = Field(
         default=20, validation_alias="MEME_SNIPING_MAX_HOLD_MINUTES"
+    )
+
+    stop_grace_sec: int = Field(default=45, validation_alias="MEME_SNIPING_STOP_GRACE_SEC")
+    stop_confirm_polls: int = Field(
+        default=2, validation_alias="MEME_SNIPING_STOP_CONFIRM_POLLS"
+    )
+    mint_cooldown_minutes: int = Field(
+        default=30, validation_alias="MEME_SNIPING_MINT_COOLDOWN_MIN"
+    )
+    poll_interval_sec: float = Field(
+        default=4.0, validation_alias="MEME_SNIPING_POLL_INTERVAL_SEC"
     )
 
     simulate: bool = Field(default=True, validation_alias="MEME_SNIPING_SIMULATE")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any
 
@@ -10,7 +11,11 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_PUMP_FUN_URL = "https://frontend-api.pump.fun/coins?offset=0&limit=30&sort=created_timestamp&order=DESC&includeNsfw=false"
+_PUMP_URLS = (
+    "https://frontend-api-v3.pump.fun/coins/currently-live?limit=30",
+    "https://frontend-api.pump.fun/coins?offset=0&limit=30&sort=created_timestamp&order=DESC&includeNsfw=false",
+    "https://client-api-2.pump.fun/coins?limit=30",
+)
 _DEX_PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 _DEX_BOOSTS_URL = "https://api.dexscreener.com/token-boosts/top/v1"
 _DEX_TOKEN_URL = "https://api.dexscreener.com/latest/dex/tokens/{mint}"
@@ -23,52 +28,70 @@ _CACHE_TTL_SEC = 45.0
 
 def _pump_headers() -> dict[str, str]:
     return {
-        "User-Agent": "Mozilla/5.0 (compatible; solana-arb-bot/2.0)",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json",
+        "Origin": "https://pump.fun",
+        "Referer": "https://pump.fun/",
+    }
+
+
+def _normalize_pump_coin(coin: dict[str, Any]) -> dict[str, Any] | None:
+    mint = str(coin.get("mint") or coin.get("token") or "").strip()
+    if not mint:
+        return None
+    return {
+        "mint": mint,
+        "name": coin.get("name"),
+        "symbol": coin.get("symbol"),
+        "liquidity": float(
+            coin.get("usd_market_cap") or coin.get("liquidity") or coin.get("market_cap") or 0
+        ),
+        "market_cap": float(coin.get("usd_market_cap") or coin.get("market_cap") or 0),
+        "price_change_5m": coin.get("price_change_5m", 0),
+        "dev_percentage": coin.get("dev_percentage", 0),
+        "social_mentions": coin.get("reply_count") or coin.get("social_mentions") or 0,
+        "volatility_bps": coin.get("volatility_bps", 0),
+        "source": "pump.fun",
     }
 
 
 async def _fetch_pump_fun(client: httpx.AsyncClient) -> list[dict[str, Any]]:
     global _pump_fail_streak, _last_pump_warn
 
-    resp = await client.get(_PUMP_FUN_URL, headers=_pump_headers())
-    if resp.status_code != 200:
-        _pump_fail_streak += 1
-        now = time.monotonic()
-        if _pump_fail_streak >= 5 and now - _last_pump_warn > 120:
-            _last_pump_warn = now
-            logger.warning(
-                "pump.fun API unavailable (HTTP %s, streak=%d) — using DexScreener fallback",
-                resp.status_code,
-                _pump_fail_streak,
-            )
-        return []
+    proxy = (os.getenv("MEME_SNIPING_HTTP_PROXY") or os.getenv("HTTPS_PROXY") or "").strip()
+    last_status = 0
 
-    _pump_fail_streak = 0
-    payload = resp.json()
-    coins = payload if isinstance(payload, list) else payload.get("coins", [])
-    out: list[dict[str, Any]] = []
-    for coin in coins:
-        if not isinstance(coin, dict):
-            continue
-        mint = str(coin.get("mint") or "").strip()
-        if not mint:
-            continue
-        out.append(
-            {
-                "mint": mint,
-                "name": coin.get("name"),
-                "symbol": coin.get("symbol"),
-                "liquidity": float(coin.get("usd_market_cap") or coin.get("liquidity") or 0),
-                "market_cap": float(coin.get("usd_market_cap") or coin.get("market_cap") or 0),
-                "price_change_5m": coin.get("price_change_5m", 0),
-                "dev_percentage": coin.get("dev_percentage", 0),
-                "social_mentions": coin.get("reply_count") or coin.get("social_mentions") or 0,
-                "volatility_bps": coin.get("volatility_bps", 0),
-                "source": "pump.fun",
-            }
+    for url in _PUMP_URLS:
+        try:
+            resp = await client.get(url, headers=_pump_headers())
+            last_status = resp.status_code
+            if resp.status_code != 200:
+                continue
+            payload = resp.json()
+            coins = payload if isinstance(payload, list) else payload.get("coins", [])
+            out: list[dict[str, Any]] = []
+            for coin in coins:
+                if not isinstance(coin, dict):
+                    continue
+                normalized = _normalize_pump_coin(coin)
+                if normalized:
+                    out.append(normalized)
+            if out:
+                _pump_fail_streak = 0
+                return out
+        except Exception as exc:
+            logger.debug("pump.fun fetch failed | url=%s err=%s", url[:48], exc)
+
+    _pump_fail_streak += 1
+    now = time.monotonic()
+    if _pump_fail_streak >= 5 and now - _last_pump_warn > 120:
+        _last_pump_warn = now
+        logger.warning(
+            "pump.fun API unavailable (last HTTP %s, streak=%d) — using DexScreener fallback",
+            last_status,
+            _pump_fail_streak,
         )
-    return out
+    return []
 
 
 def _social_score(profile: dict[str, Any], pair: dict[str, Any] | None) -> int:
@@ -125,6 +148,19 @@ async def _fetch_dex_pair(client: httpx.AsyncClient, mint: str) -> dict[str, Any
     if best:
         _dex_pair_cache[mint] = (now, best)
     return best
+
+
+async def fetch_token_mark_price_usd(mint: str) -> float | None:
+    """Best-effort USD mark from DexScreener (lower noise than Jupiter on thin pools)."""
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        pair = await _fetch_dex_pair(client, mint)
+        if not pair:
+            return None
+        try:
+            price = float(pair.get("priceUsd") or 0)
+            return price if price > 0 else None
+        except (TypeError, ValueError):
+            return None
 
 
 async def _profile_to_coin(client: httpx.AsyncClient, profile: dict[str, Any]) -> dict[str, Any] | None:
@@ -189,7 +225,12 @@ async def _fetch_dexscreener(client: httpx.AsyncClient, limit: int = 20) -> list
 
 async def fetch_candidate_coins(limit: int = 15) -> tuple[list[dict[str, Any]], str]:
     """Return normalized coin dicts and the source label used."""
-    async with httpx.AsyncClient(timeout=8.0) as client:
+    proxy = (os.getenv("MEME_SNIPING_HTTP_PROXY") or os.getenv("HTTPS_PROXY") or "").strip()
+    client_kwargs: dict[str, Any] = {"timeout": 8.0}
+    if proxy:
+        client_kwargs["proxy"] = proxy
+
+    async with httpx.AsyncClient(**client_kwargs) as client:
         pump = await _fetch_pump_fun(client)
         if pump:
             return pump[:limit], "pump.fun"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any
 
 from src.strategies.meme_sniping.config import meme_sniping_settings
@@ -15,7 +16,7 @@ from src.strategies.meme_sniping.sources import fetch_candidate_coins
 
 logger = logging.getLogger(__name__)
 
-_seen_mints: set[str] = set()
+_mint_last_seen: dict[str, float] = {}
 _summary_counter = 0
 
 
@@ -28,14 +29,39 @@ def _alchemy_rpc_hint() -> str:
     return "alchemy=env_flag_on"
 
 
+def _mint_on_cooldown(token: str) -> bool:
+    cfg = meme_sniping_settings
+    last = _mint_last_seen.get(token)
+    if last is None:
+        return False
+    return (time.monotonic() - last) < (cfg.mint_cooldown_minutes * 60)
+
+
+def _mark_mint_seen(token: str) -> None:
+    _mint_last_seen[token] = time.monotonic()
+    if len(_mint_last_seen) > 3000:
+        _prune_mint_cooldowns()
+
+
+def _prune_mint_cooldowns() -> None:
+    cfg = meme_sniping_settings
+    cutoff = time.monotonic() - (cfg.mint_cooldown_minutes * 60 * 2)
+    stale = [mint for mint, seen_at in _mint_last_seen.items() if seen_at < cutoff]
+    for mint in stale:
+        _mint_last_seen.pop(mint, None)
+
+
 async def detect_new_pools(shutdown_event: asyncio.Event | None = None) -> None:
     cfg = meme_sniping_settings
     logger.info(
-        "Meme sniping detector v2 started | simulate=%s %s min_liq=%.0f ai_conf=%.0f source=pump.fun+dexscreener",
+        "Meme sniping detector v2 started | simulate=%s %s min_liq=%.0f ai_conf=%.0f "
+        "mint_cooldown=%dm stop_grace=%ds source=pump.fun+dexscreener",
         cfg.simulate,
         _alchemy_rpc_hint(),
         cfg.min_liquidity_usd,
         cfg.ai_min_confidence,
+        cfg.mint_cooldown_minutes,
+        cfg.stop_grace_sec,
     )
 
     while True:
@@ -75,21 +101,19 @@ async def detect_new_pools(shutdown_event: asyncio.Event | None = None) -> None:
 async def process_coin(coin: dict[str, Any]) -> None:
     try:
         token = str(coin.get("mint") or "").strip()
-        if not token or token in _seen_mints:
+        if not token or _mint_on_cooldown(token):
             return
-        _seen_mints.add(token)
-        if len(_seen_mints) > 2000:
-            _seen_mints.clear()
+        _mark_mint_seen(token)
 
         decision = await should_snipe(token, coin)
         meme_sniping_metrics.record_ai(decision["approved"])
         if not decision["approved"]:
             reason = str(decision.get("reason") or "rejected")
-            if len(reason) > 40 or " " in reason and reason not in (
+            if len(reason) > 40 or (" " in reason and reason not in (
                 "vol_below_min",
                 "social_below_min",
                 "ai_rejected",
-            ):
+            )):
                 reason = "ai_rejected"
             meme_sniping_metrics.record_reject(reason)
             return
