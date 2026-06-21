@@ -229,14 +229,30 @@ async def run() -> None:
         asyncio.create_task(strategy_router.run_forever(), name="mev_router"),
         backpack_health_task,
     ]
+
+    from src.strategies.meme_sniping import meme_sniping_settings, detect_new_pools
+
+    if meme_sniping_settings.enabled:
+        tasks.append(
+            asyncio.create_task(
+                detect_new_pools(shutdown_event),
+                name="meme_sniping",
+            )
+        )
+        logger.info(
+            "Meme Sniping Strategy activated | simulate=%s max_trade_sol=%.2f",
+            meme_sniping_settings.simulate,
+            meme_sniping_settings.max_trade_sol,
+        )
+
     if webhook_task is not None:
         tasks.append(webhook_task)
 
     try:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         task_names = ["v2_cycle", "mev_router"] + (
-            ["helius_webhook"] if webhook_task is not None else []
-        )
+            ["meme_sniping"] if meme_sniping_settings.enabled else []
+        ) + (["helius_webhook"] if webhook_task is not None else [])
         for name, result in zip(task_names, results, strict=True):
             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
                 logger.error("Task %s failed: %s", name, result, exc_info=result)

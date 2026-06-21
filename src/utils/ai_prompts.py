@@ -89,6 +89,26 @@ Analyze and respond in JSON format only:
 Decide whether to execute liquidation. Respond in strict JSON format."""
 
     @staticmethod
+    def get_meme_sniping_prompt(data: dict[str, Any]) -> str:
+        return f"""Evaluate this new Solana meme for sniping (high volatility + social momentum).
+
+Token signal:
+{json.dumps(data, indent=2, default=str)}
+
+Rules:
+- Reject illiquid, suspicious dev concentration, or low social traction
+- Approve only when volatility + social score support a fast in/out scalp
+- Suggested size is in SOL (max ~1.8)
+
+Respond in strict JSON:
+{{
+  "approve": true/false,
+  "confidence": 0-100,
+  "reason": "short explanation",
+  "risk_factors": ["list"]
+}}"""
+
+    @staticmethod
     def get_daily_strategy_review_prompt(stats: dict[str, Any]) -> str:
         """Daily performance review prompt."""
         near = stats.get("cex_dex_near_misses") or {}
@@ -132,6 +152,11 @@ def get_ai_decision_prompt(strategy: str, data: dict[str, Any]) -> dict[str, str
         return {
             "system": prompts.get_system_prompt(),
             "user": prompts.get_liquidation_prompt(data),
+        }
+    if strategy == "meme_sniping":
+        return {
+            "system": prompts.get_system_prompt(),
+            "user": prompts.get_meme_sniping_prompt(data),
         }
     return {
         "system": prompts.get_system_prompt(),
