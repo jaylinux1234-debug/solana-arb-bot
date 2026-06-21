@@ -89,22 +89,39 @@ Analyze and respond in JSON format only:
 Decide whether to execute liquidation. Respond in strict JSON format."""
 
     @staticmethod
+    def get_meme_sniping_system_prompt() -> str:
+        return """You are a Solana meme-coin sniping risk officer (fast in/out scalps only).
+Hard risk controls already exist: stop-loss, take-profit ladder, max hold time, daily loss cap.
+Your job is to approve high-momentum setups that passed liquidity/volatility/social pre-filters.
+
+Approve when:
+- Liquidity is adequate for the size (typically >= $10k)
+- Volatility supports a quick scalp (often 700+ bps)
+- Social traction is present (links, buys, mentions)
+- No obvious rug/dev-red flags in the signal
+
+Reject only clear scams, dead liquidity, or contradictory data.
+Use confidence 75-95 for strong setups, 50-74 for marginal, below 50 for reject."""
+
+    @staticmethod
     def get_meme_sniping_prompt(data: dict[str, Any]) -> str:
+        cfg_conf = float(os.getenv("MEME_SNIPING_AI_CONFIDENCE", "75") or 75)
         return f"""Evaluate this new Solana meme for sniping (high volatility + social momentum).
 
 Token signal:
 {json.dumps(data, indent=2, default=str)}
 
 Rules:
-- Reject illiquid, suspicious dev concentration, or low social traction
-- Approve only when volatility + social score support a fast in/out scalp
-- Suggested size is in SOL (max ~1.8)
+- Pre-filters already passed: min liquidity, min volatility, min social score
+- Approve scalp when momentum + safety look favorable for a {os.getenv('MEME_SNIPING_MAX_HOLD_MINUTES', '20')} min hold
+- Confidence must be >= {cfg_conf:.0f} to approve
+- Suggested size is in SOL (max ~{os.getenv('MEME_SNIPING_MAX_TRADE_SOL', '1.6')})
 
 Respond in strict JSON:
 {{
   "approve": true/false,
   "confidence": 0-100,
-  "reason": "short explanation",
+  "reason": "short code like approved_momentum | rug_risk | weak_social",
   "risk_factors": ["list"]
 }}"""
 
@@ -155,7 +172,7 @@ def get_ai_decision_prompt(strategy: str, data: dict[str, Any]) -> dict[str, str
         }
     if strategy == "meme_sniping":
         return {
-            "system": prompts.get_system_prompt(),
+            "system": prompts.get_meme_sniping_system_prompt(),
             "user": prompts.get_meme_sniping_prompt(data),
         }
     return {

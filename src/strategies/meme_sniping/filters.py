@@ -79,6 +79,7 @@ async def should_snipe(token_address: str, coin: dict[str, Any]) -> dict[str, An
     confidence = float(result.get("confidence") or 0)
     approved = bool(result.get("approve")) and confidence >= cfg.ai_min_confidence
     size_sol = max(0.5, min(cfg.max_trade_sol, confidence / 58.0))
+    reason = str(result.get("reason") or ("approved" if approved else "ai_rejected"))
 
     logger.info(
         "meme_sniping_filter | mint=%s approved=%s confidence=%.1f size_sol=%.3f social=%d vol_bps=%d",
@@ -94,5 +95,5 @@ async def should_snipe(token_address: str, coin: dict[str, Any]) -> dict[str, An
         "approved": approved,
         "size_sol": size_sol,
         "confidence": confidence,
-        "reason": result.get("reason") or "AI Filter",
+        "reason": reason,
     }

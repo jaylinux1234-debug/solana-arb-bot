@@ -85,6 +85,12 @@ async def process_coin(coin: dict[str, Any]) -> None:
         meme_sniping_metrics.record_ai(decision["approved"])
         if not decision["approved"]:
             reason = str(decision.get("reason") or "rejected")
+            if len(reason) > 40 or " " in reason and reason not in (
+                "vol_below_min",
+                "social_below_min",
+                "ai_rejected",
+            ):
+                reason = "ai_rejected"
             meme_sniping_metrics.record_reject(reason)
             return
 
