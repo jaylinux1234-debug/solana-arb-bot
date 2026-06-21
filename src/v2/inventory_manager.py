@@ -250,11 +250,15 @@ class InventoryManager:
         jupiter: Any | None = None,
         *,
         wallet_pubkey: str | None = None,
+        signal: dict[str, Any] | None = None,
+        allow_replenish: bool | None = None,
     ) -> tuple[float, str]:
         return await self.usdc.replenish_usdc_for_trade(
             backpack,
             jupiter,
             wallet_pubkey=wallet_pubkey,
+            signal=signal,
+            allow_replenish=allow_replenish,
         )
 
     def trade_size_micro(self, available_usdc: float, signal_size_micro: int) -> int:

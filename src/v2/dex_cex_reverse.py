@@ -425,6 +425,7 @@ class V2ReverseLane:
             self.reverse.backpack,
             self.reverse.jupiter,
             wallet_pubkey=self.reverse.wallet_pubkey,
+            signal=opportunity,
         )
         if replenish_note:
             self.logger.info("USDC replenish note: %s", replenish_note)
@@ -686,6 +687,7 @@ class V2ReverseLane:
                 self.reverse.backpack,
                 self.reverse.jupiter,
                 wallet_pubkey=self.reverse.wallet_pubkey,
+                signal=signal,
             )
             if replenish_note:
                 self.logger.info("USDC preflight replenish note: %s", replenish_note)

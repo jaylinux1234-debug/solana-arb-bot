@@ -110,28 +110,63 @@ def get_upgraded_robust_provider(*, force_reload: bool = False) -> SolanaRobustP
     public1 = "https://api.mainnet-beta.solana.com"
     public2 = (os.getenv("RPC_PUBLIC_FALLBACK_2") or "").strip()
 
+    # When RPC_HELIUS_FALLBACK_DISABLED=true and a non-Helius provider is already
+    # serving as primary, skip Helius URLs from secondary/fallback slots to prevent
+    # unnecessary 429s on the free-tier Helius endpoint.
+    helius_fallback_disabled = _env_bool("RPC_HELIUS_FALLBACK_DISABLED", False)
+
+    def _is_helius(url: str) -> bool:
+        return "helius" in url.lower()
+
+    primary_is_helius = _is_helius(primary)
+
+    def _label(url: str) -> str:
+        """Derive a stable provider key from the URL so weights are accurate."""
+        u = url.lower()
+        if "helius" in u:
+            return "helius"
+        if "quiknode" in u or "quicknode" in u:
+            return "quicknode"
+        if "alchemy" in u:
+            return "alchemy"
+        return "custom"
+
     providers: dict[str, str] = {}
     if primary:
-        providers["helius_primary"] = primary
-    if fast:
-        providers["helius_fast"] = fast
-    if alchemy:
-        providers["alchemy"] = alchemy
-    if fallback:
+        key = f"{_label(primary)}_primary"
+        providers[key] = primary
+    if fast and fast != primary:
+        skip = helius_fallback_disabled and _is_helius(fast) and not primary_is_helius
+        if not skip:
+            key = f"{_label(fast)}_fast"
+            providers[key] = fast
+    if alchemy and alchemy not in (primary, fast):
+        skip = helius_fallback_disabled and _is_helius(alchemy) and not primary_is_helius
+        if not skip:
+            providers["alchemy"] = alchemy
+    if fallback and fallback not in (primary, fast, alchemy):
         providers["custom_fallback"] = fallback
     if _env_bool("ALLOW_PUBLIC_RPC_FALLBACK", False):
-        providers["public_fallback1"] = public1
-        if public2:
+        if public1 not in providers.values():
+            providers["public_fallback1"] = public1
+        if public2 and public2 not in providers.values():
             providers["public_fallback2"] = public2
 
-    weights = {
-        "helius_primary": 0.6,
-        "helius_fast": 0.3,
-        "alchemy": 0.15,
-        "custom_fallback": 0.1,
-        "public_fallback1": 0.05,
-        "public_fallback2": 0.05,
-    }
+    # Weight by provider quality — Alchemy/QuickNode paid tiers ranked above public Helius.
+    def _weight(key: str) -> float:
+        if key.endswith("_primary"):
+            label = key[: -len("_primary")]
+            return 0.75 if label in ("alchemy", "quicknode") else 0.6
+        if key.endswith("_fast"):
+            label = key[: -len("_fast")]
+            return 0.35 if label in ("alchemy", "quicknode") else 0.3
+        if key == "alchemy":
+            return 0.15
+        if key == "custom_fallback":
+            return 0.1
+        return 0.05
+
+    weights = {k: _weight(k) for k in providers}
 
     _UPGRADED_PROVIDER = SolanaRobustProvider(
         providers=providers,

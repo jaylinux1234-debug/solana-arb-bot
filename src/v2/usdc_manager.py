@@ -68,6 +68,40 @@ class USDCManager:
             return default
         return raw in ("1", "true", "yes", "on")
 
+    @staticmethod
+    def _safe_float(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _replenish_allowed_for_signal(self, signal: dict[str, Any] | None) -> bool:
+        """
+        Gate auto-replenish to executable positive signals when enabled.
+
+        This prevents startup/idle inventory shuffling that is unrelated to an
+        actionable trade candidate.
+        """
+        if not self._env_bool("V2_REPLENISH_ONLY_FOR_POSITIVE_SIGNALS", True):
+            return True
+        if not signal:
+            return False
+
+        min_net = self._safe_float(os.getenv("V2_REPLENISH_MIN_NET_BPS", "0.1"))
+        min_net_bps = float(min_net) if min_net is not None else 0.1
+        net_candidates = (
+            signal.get("roundtrip_net_bps"),
+            signal.get("roundtrip_model_net_bps"),
+            signal.get("net_bps"),
+        )
+        for candidate in net_candidates:
+            net = self._safe_float(candidate)
+            if net is not None:
+                return net >= min_net_bps
+        return False
+
     async def _wait_for_usdc_target(
         self,
         target: float,
@@ -183,17 +217,35 @@ class USDCManager:
         jupiter: Any | None = None,
         *,
         wallet_pubkey: str | None = None,
+        signal: dict[str, Any] | None = None,
+        allow_replenish: bool | None = None,
     ) -> tuple[float, str]:
         """
         Top up on-chain USDC via Backpack withdraw, then SOL→USDC swap fallback.
 
         Returns (available_usdc, replenish_note).
         """
+        available = await self.get_available_usdc()
+        note = ""
+
+        if available >= self.min_trade_usdc:
+            return available, note
+
+        if allow_replenish is None:
+            allow_replenish = self._replenish_allowed_for_signal(signal)
+        if not allow_replenish:
+            logger.info(
+                "USDC replenish skipped | non-positive-or-missing signal | on_chain=$%.2f min_trade=$%.2f",
+                available,
+                self.min_trade_usdc,
+            )
+            return available, "replenish_skipped_non_positive_signal"
+
         available = await self.replenish_from_backpack_if_needed(
             backpack,
             wallet_pubkey=wallet_pubkey,
+            current_available=available,
         )
-        note = ""
         if available >= self.min_trade_usdc:
             return available, note
 
@@ -220,6 +272,7 @@ class USDCManager:
         backpack: Any,
         *,
         wallet_pubkey: str | None = None,
+        current_available: float | None = None,
     ) -> float:
         """
         Withdraw USDC from Backpack when on-chain balance is below min trade.
@@ -229,7 +282,11 @@ class USDCManager:
         if not self._env_bool("V2_AUTO_WITHDRAW_USDC_FROM_CEX", True):
             return await self.get_available_usdc()
 
-        available = await self.get_available_usdc()
+        available = (
+            float(current_available)
+            if current_available is not None
+            else await self.get_available_usdc()
+        )
         target = float(os.getenv("V2_CEX_USDC_WITHDRAW_TARGET", str(self.min_usdc)))
         if available >= self.min_usdc:
             return available

@@ -15,6 +15,8 @@
     "deps:sync:dev": "node scripts/deps-sync.mjs --dev",
     "fetch:klend-idl": "node scripts/fetch-klend-idl.mjs",
     "sync:compose-env": "node scripts/sync-compose-env.mjs",
+    "dedup:env": "node scripts/dedup-env.mjs",
+    "dedup:env:dry": "node scripts/dedup-env.mjs --dry-run",
     "backtest:cex-dex": "python src/scripts/cex_dex_sim_batch.py --count 50 --mode jupiter_swap --gross-bps 15 --size 20000000",
     "backtest:cex-dex:scenarios": "node scripts/run-cex-dex-scenarios.mjs",
     "backtest:tune": "python scripts/backtest_tune_cex_dex.py --scenarios-only --gross-min 8 --gross-max 22 --size 20000000",

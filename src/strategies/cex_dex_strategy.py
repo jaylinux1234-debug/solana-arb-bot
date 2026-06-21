@@ -2641,6 +2641,8 @@ class CexDexStrategy:
         )
         if not withdraw_ref:
             logger.error("CEX buy or SOL withdraw failed")
+            # Flag that no funds were disbursed — caller should not record a fill-loss penalty
+            opp["_cex_pre_fill_reject"] = True
             return False
 
         logger.info("%s withdrawn to wallet | ref=%s", base_symbol, withdraw_ref)
@@ -3197,15 +3199,21 @@ class CexDexStrategy:
                 self._negative_tier_record_outcome(True)
             return True
 
-        self.risk.record_trade_result(-50.0, size_micro)
+        # Use 0 penalty when the CEX order was rejected before any fill (no funds moved).
+        # For real mid-execution failures use a configurable penalty (default 5 USD).
+        pre_fill_reject = bool(opp.get("_cex_pre_fill_reject"))
+        fail_penalty = 0.0 if pre_fill_reject else -float(
+            os.getenv("CEX_DEX_EXEC_FAIL_PENALTY_USDC", "5.0")
+        )
+        self.risk.record_trade_result(fail_penalty, size_micro)
         record_trade_execution(
             "cex_dex",
             success=False,
-            pnl_usd=-50.0,
+            pnl_usd=fail_penalty,
             slippage_bps=slippage_logged,
         )
         self._record_win_rate_outcome(
-            opp, success=False, realized_usdc=-50.0, trade_id=trade_id
+            opp, success=False, realized_usdc=fail_penalty, trade_id=trade_id
         )
         if is_negative_tier:
             self._negative_tier_record_outcome(False)

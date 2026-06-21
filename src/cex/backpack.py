@@ -689,11 +689,13 @@ class BackpackClient:
             quote_usdc = float(price_or_size)
             if quote_usdc > 1_000_000:
                 quote_usdc /= 1_000_000.0
+            # Backpack rejects quoteQuantity with more than 2 decimal places
+            quote_usdc_str = f"{quote_usdc:.2f}"
             body: dict[str, Any] = {
                 "symbol": sym,
                 "side": backpack_side,
                 "orderType": "Market",
-                "quoteQuantity": str(quote_usdc),
+                "quoteQuantity": quote_usdc_str,
                 "timeInForce": "IOC",
             }
         else:

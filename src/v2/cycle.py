@@ -386,11 +386,17 @@ class V2Cycle:
     async def run_startup(self) -> None:
         """USDC replenish + Backpack SOL target + inventory snapshot."""
         wallet = self.reverse.wallet_pubkey
-        startup_usdc, replenish_note = await self.inventory.replenish_usdc_for_trade(
-            self.reverse.backpack,
-            self.reverse.jupiter,
-            wallet_pubkey=wallet,
-        )
+        startup_withdraw = _env_bool("ENABLE_USDC_WITHDRAW_ON_START", False)
+        if startup_withdraw:
+            startup_usdc, replenish_note = await self.inventory.replenish_usdc_for_trade(
+                self.reverse.backpack,
+                self.reverse.jupiter,
+                wallet_pubkey=wallet,
+                allow_replenish=True,
+            )
+        else:
+            startup_usdc = await self.inventory.get_available_usdc()
+            replenish_note = "startup_withdraw_disabled"
         startup_cex_sol = await self.inventory.get_backpack_sol(self.reverse.backpack)
         logger.info(
             "Startup USDC | on_chain=$%.2f note=%s | Backpack SOL=%.6f",

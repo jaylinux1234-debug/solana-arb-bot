@@ -125,7 +125,11 @@ async def replenish_if_low(*, force: bool = False) -> dict[str, Any]:
     mgr = USDCManager(cfg)
     backpack = get_backpack_client()
     try:
-        updated, note = await mgr.replenish_usdc_for_trade(backpack, jupiter=None)
+        updated, note = await mgr.replenish_usdc_for_trade(
+            backpack,
+            jupiter=None,
+            allow_replenish=True,
+        )
         _replenish_last_at = now
         result["replenished"] = updated > usdc
         result["onchain_usdc"] = round(updated, 4)
